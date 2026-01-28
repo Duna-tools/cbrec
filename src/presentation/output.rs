@@ -121,6 +121,12 @@ impl ConsoleOutput {
     }
 }
 
+impl Default for ConsoleOutput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn formatear_calidades(calidades: &[(Option<u32>, Option<u64>)]) -> String {
     let mut items: Vec<String> = calidades
         .iter()

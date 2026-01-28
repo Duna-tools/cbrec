@@ -10,6 +10,14 @@ use tokio::task::JoinSet;
 
 const LIMITE_CONCURRENCIA_DEFECTO: usize = 3;
 
+struct ParametrosGrabacion {
+    raiz_salida: Option<PathBuf>,
+    quality: String,
+    limite_concurrencia: usize,
+    cancel_rx: watch::Receiver<bool>,
+    salida: Arc<ConsoleOutput>,
+}
+
 /// Orquesta la ejecucion de la CLI.
 pub async fn ejecutar_cli(
     cli: Cli,
@@ -54,18 +62,14 @@ pub async fn ejecutar_cli(
         }) => {
             validar_ffmpeg(ruta_ffmpeg.as_deref()).await?;
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
-            let raiz_salida = resolver_ruta_opcional(output);
-            grabar_modelos(
-                client,
-                config,
-                modelos,
-                raiz_salida,
+            let parametros = ParametrosGrabacion {
+                raiz_salida: resolver_ruta_opcional(output),
                 quality,
                 limite_concurrencia,
-                cancel_rx_worker.clone(),
-                Arc::clone(&salida),
-            )
-            .await
+                cancel_rx: cancel_rx_worker.clone(),
+                salida: Arc::clone(&salida),
+            };
+            grabar_modelos(client, config, modelos, parametros).await
         }
         Some(Commands::Check { model }) => verificar_modelo(&client, salida.as_ref(), &model).await,
         None => {
@@ -76,23 +80,19 @@ pub async fn ejecutar_cli(
 
             validar_ffmpeg(ruta_ffmpeg.as_deref()).await?;
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
-            let raiz_salida = resolver_ruta_opcional(salida_principal);
             if listar {
                 listar_calidades_modelos(&client, &salida, modelos_principales).await
             } else if verificar {
                 verificar_modelos(&client, &salida, modelos_principales).await
             } else {
-                grabar_modelos(
-                    client,
-                    config,
-                    modelos_principales,
-                    raiz_salida,
-                    calidad_principal,
+                let parametros = ParametrosGrabacion {
+                    raiz_salida: resolver_ruta_opcional(salida_principal),
+                    quality: calidad_principal,
                     limite_concurrencia,
-                    cancel_rx_worker.clone(),
-                    Arc::clone(&salida),
-                )
-                .await
+                    cancel_rx: cancel_rx_worker.clone(),
+                    salida: Arc::clone(&salida),
+                };
+                grabar_modelos(client, config, modelos_principales, parametros).await
             }
         }
     }
@@ -102,12 +102,15 @@ async fn grabar_modelos(
     client: ChaturbateClient,
     config: AppConfig,
     modelos: Vec<String>,
-    raiz_salida: Option<PathBuf>,
-    quality: String,
-    limite_concurrencia: usize,
-    cancel_rx: watch::Receiver<bool>,
-    salida: Arc<ConsoleOutput>,
+    parametros: ParametrosGrabacion,
 ) -> anyhow::Result<()> {
+    let ParametrosGrabacion {
+        raiz_salida,
+        quality,
+        limite_concurrencia,
+        cancel_rx,
+        salida,
+    } = parametros;
     let client = Arc::new(client);
     let config = Arc::new(config);
 
@@ -272,12 +275,10 @@ async fn grabar_modelo(
             salida.mostrar_archivo_pequeno_resumido(target);
         }
         tokio::fs::remove_file(&ruta_salida).await?;
+    } else if modo_detallado {
+        salida.mostrar_archivo_guardado_detallado(&ruta_salida);
     } else {
-        if modo_detallado {
-            salida.mostrar_archivo_guardado_detallado(&ruta_salida);
-        } else {
-            salida.mostrar_archivo_guardado_resumido(target, &ruta_salida);
-        }
+        salida.mostrar_archivo_guardado_resumido(target, &ruta_salida);
     }
 
     Ok(())
