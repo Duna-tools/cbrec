@@ -17,7 +17,7 @@ Caracteristicas principales:
 
 ```bash
 # Clonar el repositorio
-git clone https://github.com/tu-usuario/cbrec.git
+git clone https://github.com/Duna-tools/cbrec.git
 cd cbrec
 
 # Compilar

@@ -5,6 +5,8 @@ edition = "2021"
 authors = ["Lucas"]
 description = "Simple and efficient stream recorder"
 license = "MIT"
+repository = "https://github.com/Duna-tools/cbrec"
+homepage = "https://github.com/Duna-tools/cbrec"
 
 [dependencies]
 # Async Runtime
