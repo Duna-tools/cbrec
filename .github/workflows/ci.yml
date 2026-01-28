@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+    
+    - name: Rust cache
+      uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+    
+    - name: Check formatting
+      run: cargo fmt -- --check
+      if: matrix.os == 'ubuntu-latest'
+    
+    - name: Run clippy
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo clippy -- -D warnings
+    
+    - name: Run tests
+      run: cargo test --locked --verbose
+
+  build-release:
+    name: Build Release
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: cbrec
+            asset_name: cbrec-linux-x86_64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: cbrec
+            asset_name: cbrec-linux-aarch64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: cbrec
+            asset_name: cbrec-macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: cbrec.exe
+            asset_name: cbrec-windows-x86_64.exe
+    
+    steps:
+    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+    
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561
+      with:
+        toolchain: stable
+        target: ${{ matrix.target }}
+
+    - name: Rust cache
+      uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+    
+    - name: Install cross
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'aarch64-unknown-linux-gnu'
+      run: cargo install cross --locked
+
+    - name: Build release
+      run: |
+        if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+          cross build --release --locked --target ${{ matrix.target }}
+        else
+          cargo build --release --locked --target ${{ matrix.target }}
+        fi
+    
+    - name: Install packaging tools
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo install cargo-deb cargo-generate-rpm --locked
+
+    - name: Build Debian package
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo deb --no-build --locked --target ${{ matrix.target }}
+
+    - name: Build RPM package
+      if: matrix.os == 'ubuntu-latest'
+      run: cargo generate-rpm --target ${{ matrix.target }}
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ matrix.asset_name }}
+        path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+    - name: Upload Debian package
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ matrix.asset_name }}.deb
+        path: target/${{ matrix.target }}/debian/*.deb
+
+    - name: Upload RPM package
+      if: matrix.os == 'ubuntu-latest'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: ${{ matrix.asset_name }}.rpm
+        path: target/${{ matrix.target }}/generate-rpm/*.rpm
+
+    - name: Build Arch package
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+      run: |
+        version=$(grep -m 1 '^version = ' Cargo.toml | cut -d '"' -f 2)
+        tar \
+          --exclude=target \
+          --exclude=.git \
+          --exclude=packaging/arch/*.tar.gz \
+          --transform "s,^,cbrec-${version}/," \
+          -czf packaging/arch/cbrec-${version}.tar.gz .
+        docker run --rm \
+          -v "$PWD":/workspace \
+          -w /workspace/packaging/arch \
+          archlinux:base-devel \
+          bash -lc "pacman -Syu --noconfirm && pacman -S --noconfirm cargo pkgconf openssl && makepkg -sf --noconfirm"
+
+    - name: Upload Arch package
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+      with:
+        name: cbrec-linux-x86_64.pkg.tar.zst
+        path: packaging/arch/*.pkg.tar.zst

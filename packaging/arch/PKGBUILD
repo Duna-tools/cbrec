@@ -1,0 +1,23 @@
+pkgname=cbrec
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Simple and efficient stream recorder"
+arch=('x86_64' 'aarch64')
+url="https://github.com/tu-usuario/cbrec"
+license=('MIT')
+depends=('ffmpeg')
+makedepends=('cargo' 'pkgconf' 'openssl')
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  cargo build --release --locked
+}
+
+package() {
+  cd "${srcdir}/${pkgname}-${pkgver}"
+  install -Dm755 target/release/cbrec "${pkgdir}/usr/bin/cbrec"
+  install -Dm644 README.md "${pkgdir}/usr/share/doc/cbrec/README.md"
+  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/cbrec/LICENSE"
+}

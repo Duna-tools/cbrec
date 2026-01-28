@@ -1,0 +1,36 @@
+# Build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Recordings (test files)
+/captures/
+*.mp4
+*.ts
+
+# Config overrides
+config.local.toml
+
+# Documentation
+doc/
+.github/copilot-instructions.md
+
+.config/
+
+# Packaging
+/packaging/arch/*.tar.gz
+/packaging/arch/*.pkg.tar.zst
