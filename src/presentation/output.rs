@@ -7,11 +7,7 @@ impl ConsoleOutput {
         Self
     }
 
-    pub fn advertir_limite_concurrencia(
-        &self,
-        recomendado: usize,
-        solicitado: usize,
-    ) {
+    pub fn advertir_limite_concurrencia(&self, recomendado: usize, solicitado: usize) {
         println!(
             "[WARN] El limite recomendado es {}. Se solicito {}",
             recomendado, solicitado
@@ -25,17 +21,10 @@ impl ConsoleOutput {
     }
 
     pub fn advertir_modelos_duplicados(&self, duplicados: usize) {
-        println!(
-            "[WARN] Se omitieron {} modelo(s) duplicados",
-            duplicados
-        );
+        println!("[WARN] Se omitieron {} modelo(s) duplicados", duplicados);
     }
 
-    pub fn advertir_modelos_sobre_limite(
-        &self,
-        total: usize,
-        limite: usize,
-    ) {
+    pub fn advertir_modelos_sobre_limite(&self, total: usize, limite: usize) {
         println!(
             "[WARN] Se solicitaron {} modelos; el limite concurrente es {}",
             total, limite
@@ -43,31 +32,20 @@ impl ConsoleOutput {
     }
 
     pub fn error_fallo_grabacion(&self, modelo: &str, error: &str) {
-        println!(
-            "[ERROR] Fallo grabacion para {}: {}",
-            modelo, error
-        );
+        println!("[ERROR] Fallo grabacion para {}: {}", modelo, error);
     }
 
     pub fn error_tarea_abortada(&self, error: &str) {
         println!("[ERROR] Tarea abortada: {}", error);
     }
 
-    pub fn mostrar_inicio_detallado(
-        &self,
-        modelo: &str,
-        calidad: &str,
-    ) {
+    pub fn mostrar_inicio_detallado(&self, modelo: &str, calidad: &str) {
         println!("=== cbrec - Stream Recorder ===\n");
         println!("Modelo: {}", modelo);
         println!("Calidad: {}", calidad);
     }
 
-    pub fn mostrar_inicio_resumido(
-        &self,
-        modelo: &str,
-        calidad: &str,
-    ) {
+    pub fn mostrar_inicio_resumido(&self, modelo: &str, calidad: &str) {
         println!("[{}] Inicio grabacion (calidad {})", modelo, calidad);
     }
 
@@ -80,10 +58,7 @@ impl ConsoleOutput {
             "\n[ERROR] El modelo '{}' no esta online o no se pudo obtener el stream",
             modelo
         );
-        println!(
-            "\nPuedes verificar el estado con: cbrec check {}",
-            modelo
-        );
+        println!("\nPuedes verificar el estado con: cbrec check {}", modelo);
     }
 
     pub fn mostrar_modelo_offline_resumido(&self, modelo: &str) {
@@ -110,10 +85,7 @@ impl ConsoleOutput {
     }
 
     pub fn mostrar_archivo_pequeno_detallado(&self, bytes: u64) {
-        println!(
-            "\n[WARN] Archivo muy pequeno ({} bytes), eliminando",
-            bytes
-        );
+        println!("\n[WARN] Archivo muy pequeno ({} bytes), eliminando", bytes);
     }
 
     pub fn mostrar_archivo_pequeno_resumido(&self, modelo: &str) {
@@ -124,11 +96,7 @@ impl ConsoleOutput {
         println!("\n[OK] Archivo guardado: {}", ruta.display());
     }
 
-    pub fn mostrar_archivo_guardado_resumido(
-        &self,
-        modelo: &str,
-        ruta: &Path,
-    ) {
+    pub fn mostrar_archivo_guardado_resumido(&self, modelo: &str, ruta: &Path) {
         println!("[{}] Guardado: {}", modelo, ruta.display());
     }
 
@@ -148,16 +116,8 @@ impl ConsoleOutput {
         println!("[{}] Sin variantes en playlist", modelo);
     }
 
-    pub fn mostrar_calidades(
-        &self,
-        modelo: &str,
-        calidades: &[(Option<u32>, Option<u64>)],
-    ) {
-        println!(
-            "[{}] {}",
-            modelo,
-            formatear_calidades(calidades)
-        );
+    pub fn mostrar_calidades(&self, modelo: &str, calidades: &[(Option<u32>, Option<u64>)]) {
+        println!("[{}] {}", modelo, formatear_calidades(calidades));
     }
 }
 

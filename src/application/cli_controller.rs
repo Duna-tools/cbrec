@@ -33,10 +33,7 @@ pub async fn ejecutar_cli(
         anyhow::bail!("El limite de concurrencia debe ser mayor a 0");
     }
     if limite_concurrencia > LIMITE_CONCURRENCIA_DEFECTO {
-        salida.advertir_limite_concurrencia(
-            LIMITE_CONCURRENCIA_DEFECTO,
-            limite_concurrencia,
-        );
+        salida.advertir_limite_concurrencia(LIMITE_CONCURRENCIA_DEFECTO, limite_concurrencia);
     }
 
     let ruta_ffmpeg = resolver_ruta_opcional(ffmpeg_path);
@@ -70,9 +67,7 @@ pub async fn ejecutar_cli(
             )
             .await
         }
-        Some(Commands::Check { model }) => {
-            verificar_modelo(&client, salida.as_ref(), &model).await
-        }
+        Some(Commands::Check { model }) => verificar_modelo(&client, salida.as_ref(), &model).await,
         None => {
             if modelos_principales.is_empty() {
                 salida.mostrar_error_sin_modelo();
@@ -83,8 +78,7 @@ pub async fn ejecutar_cli(
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
             let raiz_salida = resolver_ruta_opcional(salida_principal);
             if listar {
-                listar_calidades_modelos(&client, &salida, modelos_principales)
-                    .await
+                listar_calidades_modelos(&client, &salida, modelos_principales).await
             } else if verificar {
                 verificar_modelos(&client, &salida, modelos_principales).await
             } else {
@@ -180,10 +174,7 @@ async fn grabar_modelos(
                 .await;
 
                 if let Err(err) = resultado {
-                    salida.error_fallo_grabacion(
-                        &modelo,
-                        &err.to_string(),
-                    );
+                    salida.error_fallo_grabacion(&modelo, &err.to_string());
                     errores.push(modelo);
                 }
             }
@@ -343,10 +334,8 @@ async fn listar_calidades_modelos(
             continue;
         }
 
-        let calidades_formato: Vec<(Option<u32>, Option<u64>)> = calidades
-            .iter()
-            .map(|c| (c.height, c.bandwidth))
-            .collect();
+        let calidades_formato: Vec<(Option<u32>, Option<u64>)> =
+            calidades.iter().map(|c| (c.height, c.bandwidth)).collect();
         salida.mostrar_calidades(model_name.as_str(), &calidades_formato);
     }
 

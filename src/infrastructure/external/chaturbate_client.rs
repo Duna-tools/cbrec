@@ -434,9 +434,8 @@ fn seleccionar_variante<'a>(
 }
 
 fn resolver_url(base: &str, relativa: &str) -> Result<String, InfrastructureError> {
-    let base = reqwest::Url::parse(base).map_err(|e| {
-        InfrastructureError::ExternalService(format!("Invalid base URL: {}", e))
-    })?;
+    let base = reqwest::Url::parse(base)
+        .map_err(|e| InfrastructureError::ExternalService(format!("Invalid base URL: {}", e)))?;
     let url = base
         .join(relativa)
         .map_err(|e| InfrastructureError::ExternalService(format!("Invalid URL: {}", e)))?;
