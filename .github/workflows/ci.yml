@@ -98,15 +98,15 @@ jobs:
       run: cross build --release --locked --target ${{ matrix.target }}
     
     - name: Install packaging tools
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
       run: cargo install cargo-deb cargo-generate-rpm --locked
 
     - name: Build Debian package
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
       run: cargo deb --no-build --locked --target ${{ matrix.target }}
 
     - name: Build RPM package
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
       run: cargo generate-rpm --target ${{ matrix.target }}
     
     - name: Upload artifact
@@ -116,14 +116,14 @@ jobs:
         path: target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
 
     - name: Upload Debian package
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ matrix.asset_name }}.deb
         path: target/${{ matrix.target }}/debian/*.deb
 
     - name: Upload RPM package
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: ${{ matrix.asset_name }}.rpm
@@ -143,7 +143,13 @@ jobs:
           -v "$PWD":/workspace \
           -w /workspace/packaging/arch \
           archlinux:base-devel \
-          bash -lc "pacman -Syu --noconfirm && pacman -S --noconfirm cargo pkgconf openssl && makepkg -sf --noconfirm"
+          bash -lc "
+            pacman -Syu --noconfirm && \
+            pacman -S --noconfirm cargo pkgconf openssl sudo && \
+            useradd -m builder && \
+            chown -R builder:builder /workspace && \
+            sudo -u builder makepkg -sf --noconfirm
+          "
 
     - name: Upload Arch package
       if: matrix.os == 'ubuntu-latest' && matrix.target == 'x86_64-unknown-linux-gnu'
