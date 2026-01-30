@@ -164,63 +164,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    
+
     steps:
-    - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-    
     - name: Download all artifacts
-      uses: actions/download-artifact@87c55149d96e628cc2ef7e6fc2aab372015aec85 # v4
+      uses: actions/download-artifact@v4
       with:
         path: artifacts
-    
-    - name: Create release
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        version=${GITHUB_REF#refs/tags/}
-        
-        # Crear notas del release
-        cat > release_notes.md << 'EOF'
-        ## Instalación
 
-        ### Linux (x86_64)
-        ```bash
-        # Binario
-        wget https://github.com/Duna-tools/cbrec/releases/download/${version}/cbrec-linux-x86_64
-        chmod +x cbrec-linux-x86_64
-        sudo mv cbrec-linux-x86_64 /usr/local/bin/cbrec
-
-        # Debian/Ubuntu
-        wget https://github.com/Duna-tools/cbrec/releases/download/${version}/cbrec-linux-x86_64.deb
-        sudo dpkg -i cbrec-linux-x86_64.deb
-
-        # Fedora/RHEL/CentOS
-        wget https://github.com/Duna-tools/cbrec/releases/download/${version}/cbrec-linux-x86_64.rpm
-        sudo rpm -i cbrec-linux-x86_64.rpm
-
-        # Arch Linux
-        wget https://github.com/Duna-tools/cbrec/releases/download/${version}/cbrec-linux-x86_64.pkg.tar.zst
-        sudo pacman -U cbrec-linux-x86_64.pkg.tar.zst
-        ```
-
-        ### macOS (x86_64)
-        ```bash
-        wget https://github.com/Duna-tools/cbrec/releases/download/${version}/cbrec-macos-x86_64
-        chmod +x cbrec-macos-x86_64
-        sudo mv cbrec-macos-x86_64 /usr/local/bin/cbrec
-        ```
-
-        ### Windows (x86_64)
-        Descarga `cbrec-windows-x86_64.exe` y añádelo a tu PATH.
-
-        ## Uso
-        ```bash
-        cbrec --help
-        ```
-        EOF
-        
-        # Crear el release
-        gh release create "${version}" \
-          --title "Release ${version}" \
-          --notes-file release_notes.md \
-          artifacts/*/* || true
+    - name: Create GitHub Release and upload assets
+      uses: softprops/action-gh-release@v1
+      with:
+        files: artifacts/**
