@@ -24,7 +24,7 @@ impl Default for AppConfig {
         };
         Self {
             output_root,
-            min_file_size: 1024,
+            min_file_size: 262_144_000, // 250 MiB por defecto
             naming_template: "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
                 .to_string(),
         }

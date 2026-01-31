@@ -84,12 +84,20 @@ impl ConsoleOutput {
         println!("[{}] Cancelada", modelo);
     }
 
-    pub fn mostrar_archivo_pequeno_detallado(&self, bytes: u64) {
-        println!("\n[WARN] Archivo muy pequeno ({} bytes), eliminando", bytes);
+    pub fn mostrar_archivo_pequeno_detallado(&self, bytes: u64, destino: &Path) {
+        println!(
+            "\n[WARN] Archivo muy pequeno ({} bytes), movido a {}",
+            bytes,
+            destino.display()
+        );
     }
 
-    pub fn mostrar_archivo_pequeno_resumido(&self, modelo: &str) {
-        println!("[{}] Archivo muy pequeno, eliminando", modelo);
+    pub fn mostrar_archivo_pequeno_resumido(&self, modelo: &str, destino: &Path) {
+        println!(
+            "[{}] Archivo pequeno, movido a {}",
+            modelo,
+            destino.display()
+        );
     }
 
     pub fn mostrar_archivo_guardado_detallado(&self, ruta: &Path) {

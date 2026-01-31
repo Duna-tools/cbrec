@@ -5,8 +5,9 @@
 ; Linux: /home/<usuario>/Videos
 output_root = ~/Videos
 
-; Tamaño mínimo de archivo (bytes). Archivos menores se eliminan.
-min_file_size = 1024
+; Tamaño mínimo de archivo (bytes). Archivos menores se marcan como parciales.
+; 250 MiB por defecto: 262144000
+min_file_size = 262144000
 
 [naming]
 ; Plantilla para nombres de archivo.

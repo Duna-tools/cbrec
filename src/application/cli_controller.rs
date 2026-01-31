@@ -242,6 +242,13 @@ async fn grabar_modelo(
     }
 
     let ruta_salida = config.get_output_path(model_name.as_str(), raiz_salida_override);
+    let ruta_parcial = ruta_salida.with_file_name(format!(
+        "{}.part",
+        ruta_salida
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("output")
+    ));
 
     if let Some(parent) = ruta_salida.parent() {
         tokio::fs::create_dir_all(parent).await?;
@@ -252,7 +259,7 @@ async fn grabar_modelo(
     }
 
     match client
-        .download_stream(&stream_url, &ruta_salida, quality)
+        .download_stream(&stream_url, &ruta_parcial, quality)
         .await
     {
         Ok(()) => {}
@@ -267,17 +274,29 @@ async fn grabar_modelo(
         Err(err) => return Err(err.into()),
     }
 
-    let metadata = tokio::fs::metadata(&ruta_salida).await?;
+    let metadata = tokio::fs::metadata(&ruta_parcial).await?;
     if metadata.len() < config.min_file_size {
+        let small_dir = ruta_salida
+            .parent()
+            .map(|p| p.join("small"))
+            .unwrap_or_else(|| PathBuf::from("small"));
+        tokio::fs::create_dir_all(&small_dir).await?;
+        let destino_small = small_dir.join(
+            ruta_salida
+                .file_name()
+                .unwrap_or_else(|| std::ffi::OsStr::new("cbrec.partial")),
+        );
+        tokio::fs::rename(&ruta_parcial, &destino_small).await?;
         if modo_detallado {
-            salida.mostrar_archivo_pequeno_detallado(metadata.len());
+            salida.mostrar_archivo_pequeno_detallado(metadata.len(), &destino_small);
         } else {
-            salida.mostrar_archivo_pequeno_resumido(target);
+            salida.mostrar_archivo_pequeno_resumido(target, &destino_small);
         }
-        tokio::fs::remove_file(&ruta_salida).await?;
     } else if modo_detallado {
+        tokio::fs::rename(&ruta_parcial, &ruta_salida).await?;
         salida.mostrar_archivo_guardado_detallado(&ruta_salida);
     } else {
+        tokio::fs::rename(&ruta_parcial, &ruta_salida).await?;
         salida.mostrar_archivo_guardado_resumido(target, &ruta_salida);
     }
 

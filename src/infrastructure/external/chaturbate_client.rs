@@ -13,7 +13,6 @@ use tokio::time::{sleep, Duration};
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36";
 const HTTP_TIMEOUT_SECS: u64 = 10;
-const MIN_FILE_SIZE_BYTES: u64 = 1024;
 const BYTES_PER_MEGABYTE: f64 = 1_048_576.0;
 const HTTP_RETRY_MAX: usize = 3;
 const HTTP_RETRY_BASE_MS: u64 = 200;
@@ -228,13 +227,6 @@ impl StreamRepository for ChaturbateClient {
             .await
             .map(|m| m.len())
             .unwrap_or(0);
-
-        if file_size < MIN_FILE_SIZE_BYTES {
-            return Err(InfrastructureError::RecordingError(format!(
-                "Recording failed: file size is only {} bytes",
-                file_size
-            )));
-        }
 
         println!(
             "[OK] Recording completed: {} ({:.2} MB)",
