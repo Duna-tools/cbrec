@@ -139,7 +139,7 @@ jobs:
           cp "target/${{ matrix.target }}/release/cbrec" "dist/${{ matrix.dist_prefix }}"
 
           # DEB (write straight to dist with a stable name)
-          cargo deb --no-build --locked --output "dist/${{ matrix.dist_prefix }}.deb"
+          cargo deb --no-build --locked --target ${{ matrix.target }} --output "dist/${{ matrix.dist_prefix }}.deb"
 
           # RPM (generated under target/generate-rpm/*.rpm)
           cargo generate-rpm --target ${{ matrix.target }}
@@ -180,7 +180,7 @@ jobs:
           }
 
           # Build MSI (lands in target\wix\*.msi)
-          cargo wix
+          cargo wix --target ${{ matrix.target }}
 
           $msi = Get-ChildItem -Path "target\wix" -Filter "*.msi" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "MSI not found under target\wix" }
