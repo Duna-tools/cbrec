@@ -1,4 +1,4 @@
-name: CI
+name: Build & Release
 
 on:
   push:
@@ -171,7 +171,51 @@ jobs:
       with:
         path: artifacts
 
+    - name: Create release notes
+      env:
+        VERSION: ${{ github.ref_name }}
+      run: |
+        cat > release_notes.md <<'EOF'
+        Release ${VERSION}
+
+        Binaries and packages built by CI for this release.
+
+        Instalación (ejemplos):
+
+        Linux (Debian):
+        ```bash
+        wget https://github.com/Duna-tools/cbrec/releases/download/${VERSION}/cbrec-linux-x86_64.deb
+        sudo dpkg -i cbrec-linux-x86_64.deb
+        ```
+
+        Fedora/RPM:
+        ```bash
+        wget https://github.com/Duna-tools/cbrec/releases/download/${VERSION}/cbrec-linux-x86_64.rpm
+        sudo rpm -i cbrec-linux-x86_64.rpm
+        ```
+
+        Arch:
+        ```bash
+        wget https://github.com/Duna-tools/cbrec/releases/download/${VERSION}/cbrec-linux-x86_64.pkg.tar.zst
+        sudo pacman -U cbrec-linux-x86_64.pkg.tar.zst
+        ```
+
+        macOS:
+        ```bash
+        wget https://github.com/Duna-tools/cbrec/releases/download/${VERSION}/cbrec-macos-x86_64
+        chmod +x cbrec-macos-x86_64
+        sudo mv cbrec-macos-x86_64 /usr/local/bin/cbrec
+        ```
+
+        Windows:
+        Descarga `cbrec-windows-x86_64.exe` y añádelo a tu PATH.
+
+        EOF
+
     - name: Create GitHub Release and upload assets
       uses: softprops/action-gh-release@v1
       with:
+        tag_name: ${{ github.ref_name }}
+        name: Release ${{ github.ref_name }} - Debian
         files: artifacts/**
+        body_path: release_notes.md
