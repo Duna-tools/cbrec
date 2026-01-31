@@ -27,10 +27,3 @@ config.local.toml
 
 # Documentation
 doc/
-.github/copilot-instructions.md
-
-.config/
-
-# Packaging
-/packaging/arch/*.tar.gz
-/packaging/arch/*.pkg.tar.zst
