@@ -1,5 +1,14 @@
+set -euo pipefail
+VER="${GITHUB_REF_NAME#v}"
+URL="https://github.com/Duna-tools/cbrec/archive/refs/tags/v${VER}.tar.gz"
+OUT="cbrec-${VER}.tar.gz"
+
+curl -L -o "$OUT" "$URL"
+SHA="$(sha256sum "$OUT" | awk '{print $1}')"
+
+cat > PKGBUILD <<EOF
 pkgname=cbrec
-pkgver=0.0.1
+pkgver=${VER}
 pkgrel=1
 pkgdesc="Simple and efficient stream recorder"
 arch=('x86_64' 'aarch64')
@@ -7,17 +16,6 @@ url="https://github.com/Duna-tools/cbrec"
 license=('MIT')
 depends=('ffmpeg')
 makedepends=('cargo' 'pkgconf')
-source=("${pkgname}-${pkgver}.tar.gz")
-sha256sums=('SKIP')
-
-build() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
-  cargo build --release --locked
-}
-
-package() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
-  install -Dm755 target/release/cbrec "${pkgdir}/usr/bin/cbrec"
-  install -Dm644 README.md "${pkgdir}/usr/share/doc/cbrec/README.md"
-  install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/cbrec/LICENSE"
-}
+source=("cbrec-\${pkgver}.tar.gz::${URL}")
+sha256sums=('${SHA}')
+EOF

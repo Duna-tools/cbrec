@@ -1,19 +1,18 @@
 [general]
-# Directorio base donde se guardaran las grabaciones
-# Se crea cb_rec/<modelo> dentro de esta ruta
-# Windows: "C:\\Users\\<usuario>\\Videos"
-# Linux: "/home/<usuario>/Videos"
-output_root = "~/Videos"
+; Directorio base donde se guardarán las grabaciones.
+; Se crea cb_rec/<modelo> dentro de esta ruta.
+; Windows: C:\Users\<usuario>\Videos
+; Linux: /home/<usuario>/Videos
+output_root = ~/Videos
 
-# Tamano minimo de archivo (bytes)
-# Archivos menores seran eliminados automaticamente
+; Tamaño mínimo de archivo (bytes). Archivos menores se eliminan.
 min_file_size = 1024
 
 [naming]
-# Plantilla para nombres de archivo
-# Variables disponibles: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
-template = "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
+; Plantilla para nombres de archivo.
+; Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
 
-# Ejemplos de plantillas alternativas:
-# template = "{model}/{year}-{month}-{day}_{hour}h{minute}m.mp4"
-# template = "{year}/{month}/{model}_{day}_{hour}{minute}.mp4"
+; Alternativas:
+; template = {model}/{year}-{month}-{day}_{hour}h{minute}m.mp4
+; template = {year}/{month}/{model}_{day}_{hour}{minute}.mp4

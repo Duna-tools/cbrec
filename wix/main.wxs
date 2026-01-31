@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="cbrec" Language="1033" Version="0.0.1" Manufacturer="Lucas" UpgradeCode="PUT-GUID-HERE">
+  <Product Id="*" Name="cbrec" Language="1033" Version="0.0.1" Manufacturer="Duna Tools" UpgradeCode="11111111-2222-3333-4444-555555555555">
     <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
     <MediaTemplate />
 
@@ -11,7 +11,7 @@
     </Directory>
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-      <Component Id="cmp_cbrec_exe" Guid="PUT-GUID-HERE">
+      <Component Id="cmp_cbrec_exe" Guid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee">
         <File Id="fil_cbrec_exe" Source="target\release\cbrec.exe" KeyPath="yes" />
       </Component>
     </ComponentGroup>
