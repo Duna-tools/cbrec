@@ -8,6 +8,10 @@ license = "MIT"
 repository = "https://github.com/Duna-tools/cbrec"
 homepage = "https://github.com/Duna-tools/cbrec"
 
+[package.metadata]
+# Contact info used by packaging tools when available
+maintainer = "Lucas <lucas@users.noreply.github.com>"
+
 [dependencies]
 # Async Runtime
 tokio = { version = "1.35", features = ["full"] }
