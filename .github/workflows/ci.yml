@@ -212,6 +212,17 @@ jobs:
 
         EOF
 
+    - name: List artifacts (diagnostic)
+      run: |
+        echo "Artifacts directory contents:"
+        ls -R artifacts || true
+
+    - name: Show glob matches for artifacts/** (diagnostic)
+      run: |
+        echo "Globbing artifacts/** matches:"
+        shopt -s globstar 2>/dev/null || true
+        for f in artifacts/**; do echo "$f"; done || true
+
     - name: Create GitHub Release and upload assets
       uses: softprops/action-gh-release@v1
       with:
@@ -219,3 +230,4 @@ jobs:
         name: Release ${{ github.ref_name }} - Debian
         files: artifacts/**
         body_path: release_notes.md
+        fail_on_unmatched_files: false
