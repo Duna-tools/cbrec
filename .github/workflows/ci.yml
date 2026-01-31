@@ -172,8 +172,12 @@ jobs:
           # Copy EXE as well (useful alongside MSI)
           Copy-Item "target\${{ matrix.target }}\release\cbrec.exe" "dist\${{ matrix.dist_prefix }}.exe" -Force
 
-          # Ensure wix/main.wxs exists (init is idempotent; creates wix\main.wxs if missing)
-          cargo wix init
+          # Ensure wix/main.wxs exists (skip init if already present)
+          if (-not (Test-Path "wix\\main.wxs")) {
+            cargo wix init
+          } else {
+            Write-Host "wix/main.wxs exists; skipping cargo wix init"
+          }
 
           # Build MSI (lands in target\wix\*.msi)
           cargo wix

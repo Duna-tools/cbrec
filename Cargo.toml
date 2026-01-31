@@ -52,7 +52,7 @@ depends = "$auto, ffmpeg"
 section = "video"
 priority = "optional"
 assets = [
-  ["target/x86_64-unknown-linux-gnu/release/cbrec", "usr/bin/cbrec", "755"],
+  ["target/release/cbrec", "usr/bin/cbrec", "755"],
   ["README.md", "usr/share/doc/cbrec/README.md", "644"],
   ["LICENSE", "usr/share/doc/cbrec/LICENSE", "644"],
 ]
@@ -61,7 +61,7 @@ assets = [
 license = "MIT"
 summary = "Simple and efficient stream recorder"
 assets = [
-  { source = "target/x86_64-unknown-linux-gnu/release/cbrec", dest = "/usr/bin/cbrec", mode = "755" },
+  { source = "target/release/cbrec", dest = "/usr/bin/cbrec", mode = "755" },
   { source = "README.md", dest = "/usr/share/doc/cbrec/README.md", mode = "644" },
   { source = "LICENSE", dest = "/usr/share/doc/cbrec/LICENSE", mode = "644" },
 ]
