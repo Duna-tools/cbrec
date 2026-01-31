@@ -141,15 +141,8 @@ jobs:
           # DEB (write straight to dist with a stable name)
           cargo deb --no-build --locked --target ${{ matrix.target }} --output "dist/${{ matrix.dist_prefix }}.deb"
 
-          # RPM (path differs per target; search under target/**/generate-rpm)
-          cargo generate-rpm --target ${{ matrix.target }}
-          rpm_file="$(find target -path \"*generate-rpm*\" -name '*.rpm' | head -n 1)"
-          if [[ -z \"$rpm_file\" ]]; then
-            echo \"RPM not found after cargo generate-rpm\" >&2
-            find target -maxdepth 3 -type d -print
-            exit 2
-          fi
-          cp \"$rpm_file\" \"dist/${{ matrix.dist_prefix }}.rpm\"
+          # RPM: write directly to dist with a stable name
+          cargo generate-rpm --target ${{ matrix.target }} --output \"dist/${{ matrix.dist_prefix }}.rpm\"
 
       # --- Package Windows: .msi (cargo-wix) ---
       - name: Install WiX Toolset (Windows)
