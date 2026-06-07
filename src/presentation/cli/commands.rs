@@ -87,4 +87,3 @@ pub enum Commands {
         quality: String,
     },
 }
-

@@ -86,8 +86,7 @@ mod tests {
 
     #[test]
     fn deduplicar_cuenta_duplicados_ignora_vacios() {
-        let (unicos, dups) =
-            deduplicar_modelos(vec!["alice".into(), "".into(), "alice".into()]);
+        let (unicos, dups) = deduplicar_modelos(vec!["alice".into(), "".into(), "alice".into()]);
         assert_eq!(unicos, vec!["alice"]);
         assert_eq!(dups, 1);
     }

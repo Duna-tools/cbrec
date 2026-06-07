@@ -46,8 +46,10 @@ pub(crate) async fn descargar_grabacion(
             .map(|p| p.join("small"))
             .unwrap_or_else(|| PathBuf::from("small"));
         tokio::fs::create_dir_all(&small_dir).await?;
-        let destino = small_dir
-            .join(ruta.file_name().unwrap_or_else(|| OsStr::new("cbrec.partial")));
+        let destino = small_dir.join(
+            ruta.file_name()
+                .unwrap_or_else(|| OsStr::new("cbrec.partial")),
+        );
         tokio::fs::rename(&parcial, &destino).await?;
         Ok(ResultadoGrabacion::Pequeno(destino, meta.len()))
     } else {

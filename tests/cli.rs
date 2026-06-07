@@ -59,7 +59,12 @@ fn parse_check_flag() {
 fn parse_watch_command() {
     let cli = Cli::parse_from(["cbrec", "watch", "alice", "bob", "-q", "720p"]);
     match cli.command {
-        Some(Commands::Watch { modelos, ask, quality, .. }) => {
+        Some(Commands::Watch {
+            modelos,
+            ask,
+            quality,
+            ..
+        }) => {
             assert_eq!(modelos, vec!["alice", "bob"]);
             assert!(!ask);
             assert_eq!(quality, "720p");

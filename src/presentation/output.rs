@@ -3,8 +3,12 @@ use dialoguer;
 use std::path::Path;
 
 pub trait Output: Send + Sync {
-    fn is_verbose(&self) -> bool { false }
-    fn is_quiet(&self) -> bool { false }
+    fn is_verbose(&self) -> bool {
+        false
+    }
+    fn is_quiet(&self) -> bool {
+        false
+    }
     fn advertir_limite_concurrencia(&self, recomendado: usize, solicitado: usize);
     fn mostrar_error_sin_modelo(&self);
     fn advertir_modelos_duplicados(&self, duplicados: usize);
@@ -58,35 +62,55 @@ impl Default for ConsoleOutput {
 }
 
 impl Output for ConsoleOutput {
-    fn is_verbose(&self) -> bool { self.verbose }
-    fn is_quiet(&self) -> bool { self.quiet }
+    fn is_verbose(&self) -> bool {
+        self.verbose
+    }
+    fn is_quiet(&self) -> bool {
+        self.quiet
+    }
 
     fn advertir_limite_concurrencia(&self, recomendado: usize, solicitado: usize) {
         eprintln!(
             "{} El limite recomendado es {}. Se solicito {}",
-            "[WARN]".yellow().bold(), recomendado, solicitado
+            "[WARN]".yellow().bold(),
+            recomendado,
+            solicitado
         );
     }
 
     fn mostrar_error_sin_modelo(&self) {
-        eprintln!("{} Debes especificar un modelo o comando", "Error:".red().bold());
+        eprintln!(
+            "{} Debes especificar un modelo o comando",
+            "Error:".red().bold()
+        );
         eprintln!("Uso: cbrec <nombremodelo> [<nombremodelo> ...]");
         eprintln!("     cbrec check <nombremodelo>");
     }
 
     fn advertir_modelos_duplicados(&self, duplicados: usize) {
-        eprintln!("{} Se omitieron {} modelo(s) duplicados", "[WARN]".yellow().bold(), duplicados);
+        eprintln!(
+            "{} Se omitieron {} modelo(s) duplicados",
+            "[WARN]".yellow().bold(),
+            duplicados
+        );
     }
 
     fn advertir_modelos_sobre_limite(&self, total: usize, limite: usize) {
         eprintln!(
             "{} Se solicitaron {} modelos; el limite concurrente es {}",
-            "[WARN]".yellow().bold(), total, limite
+            "[WARN]".yellow().bold(),
+            total,
+            limite
         );
     }
 
     fn error_fallo_grabacion(&self, modelo: &str, error: &str) {
-        eprintln!("{} Fallo grabacion para {}: {}", "[ERROR]".red().bold(), modelo.cyan(), error);
+        eprintln!(
+            "{} Fallo grabacion para {}: {}",
+            "[ERROR]".red().bold(),
+            modelo.cyan(),
+            error
+        );
     }
 
     fn error_tarea_abortada(&self, error: &str) {
@@ -94,26 +118,33 @@ impl Output for ConsoleOutput {
     }
 
     fn mostrar_inicio_detallado(&self, modelo: &str, calidad: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("=== cbrec - Stream Recorder ===\n");
         println!("Modelo:  {}", modelo.cyan());
         println!("Calidad: {}", calidad);
     }
 
     fn mostrar_inicio_resumido(&self, modelo: &str, calidad: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("[{}] Inicio grabacion (calidad {})", modelo.cyan(), calidad);
     }
 
     fn mostrar_verificando_disponibilidad(&self) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("Verificando disponibilidad...");
     }
 
     fn mostrar_modelo_offline_detallado(&self, modelo: &str) {
         println!(
             "\n{} El modelo '{}' no esta online o no se pudo obtener el stream",
-            "[ERROR]".red().bold(), modelo.cyan()
+            "[ERROR]".red().bold(),
+            modelo.cyan()
         );
         println!("\nPuedes verificar el estado con: cbrec check {}", modelo);
     }
@@ -123,12 +154,16 @@ impl Output for ConsoleOutput {
     }
 
     fn mostrar_modelo_online_detallado(&self) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("{} Modelo online\n", "[OK]".green().bold());
     }
 
     fn mostrar_detalle_inicio_grabacion(&self, ruta: &Path) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("Archivo: {}", ruta.display().to_string().bright_black());
         println!("\nIniciando grabacion...");
         println!("Presiona Ctrl+C para detener\n");
@@ -161,23 +196,43 @@ impl Output for ConsoleOutput {
     }
 
     fn mostrar_archivo_guardado_detallado(&self, ruta: &Path) {
-        println!("\n{} Archivo guardado: {}", "[OK]".green().bold(), ruta.display().to_string().bright_black());
+        println!(
+            "\n{} Archivo guardado: {}",
+            "[OK]".green().bold(),
+            ruta.display().to_string().bright_black()
+        );
     }
 
     fn mostrar_archivo_guardado_resumido(&self, modelo: &str, ruta: &Path) {
-        println!("[{}] Guardado: {}", modelo.cyan(), ruta.display().to_string().bright_black());
+        println!(
+            "[{}] Guardado: {}",
+            modelo.cyan(),
+            ruta.display().to_string().bright_black()
+        );
     }
 
     fn mostrar_inicio_verificacion(&self, modelo: &str) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("Verificando estado de: {}", modelo.cyan());
     }
 
     fn mostrar_estado_modelo(&self, modelo: &str, online: bool) {
         if online {
-            println!("{} {} esta {}", "[OK]".green().bold(), modelo.cyan(), "ONLINE".green());
+            println!(
+                "{} {} esta {}",
+                "[OK]".green().bold(),
+                modelo.cyan(),
+                "ONLINE".green()
+            );
         } else {
-            println!("{} {} esta {}", "[OFFLINE]".yellow(), modelo.cyan(), "OFFLINE".yellow());
+            println!(
+                "{} {} esta {}",
+                "[OFFLINE]".yellow(),
+                modelo.cyan(),
+                "OFFLINE".yellow()
+            );
         }
     }
 
@@ -190,7 +245,9 @@ impl Output for ConsoleOutput {
     }
 
     fn mostrar_progreso_grabacion(&self, modelo: &str, bytes: u64) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         let mb = bytes as f64 / 1_048_576.0;
         println!(
             "[{}][{}] Grabando... {}",
@@ -201,9 +258,18 @@ impl Output for ConsoleOutput {
     }
 
     fn watch_inicio(&self, modelos: &[&str]) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("=== cbrec watch iniciado ===");
-        println!("Monitorizando: {}", modelos.iter().map(|m| m.cyan().to_string()).collect::<Vec<_>>().join(", "));
+        println!(
+            "Monitorizando: {}",
+            modelos
+                .iter()
+                .map(|m| m.cyan().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         println!("Presiona Ctrl+C para detener\n");
     }
 
@@ -217,8 +283,15 @@ impl Output for ConsoleOutput {
     }
 
     fn watch_tick_offline(&self, modelo: &str) {
-        if self.quiet { return; }
-        println!("[{}][{}] {}", ahora().bright_black(), modelo.cyan(), "offline".yellow());
+        if self.quiet {
+            return;
+        }
+        println!(
+            "[{}][{}] {}",
+            ahora().bright_black(),
+            modelo.cyan(),
+            "offline".yellow()
+        );
     }
 
     fn watch_pregunta_grabar(&self, modelo: &str) -> bool {
@@ -230,7 +303,11 @@ impl Output for ConsoleOutput {
     }
 
     fn watch_inicio_grabacion(&self, modelo: &str) {
-        println!("[{}][{}] Iniciando grabacion...", ahora().bright_black(), modelo.cyan());
+        println!(
+            "[{}][{}] Iniciando grabacion...",
+            ahora().bright_black(),
+            modelo.cyan()
+        );
     }
 
     fn watch_fin_grabacion(&self, modelo: &str, ruta: &Path) {
@@ -244,16 +321,26 @@ impl Output for ConsoleOutput {
     }
 
     fn watch_modelo_omitido(&self, modelo: &str) {
-        println!("[{}][{}] Omitido por el usuario", ahora().bright_black(), modelo.cyan());
+        println!(
+            "[{}][{}] Omitido por el usuario",
+            ahora().bright_black(),
+            modelo.cyan()
+        );
     }
 
     fn watch_proximo_check(&self, secs: u64) {
-        if self.quiet { return; }
+        if self.quiet {
+            return;
+        }
         println!("[{}] Próximo ciclo en {} s", ahora().bright_black(), secs);
     }
 
     fn watch_deteniendo(&self) {
-        println!("\n[{}] {}", ahora().bright_black(), "Deteniendo daemon watch...".yellow());
+        println!(
+            "\n[{}] {}",
+            ahora().bright_black(),
+            "Deteniendo daemon watch...".yellow()
+        );
     }
 }
 

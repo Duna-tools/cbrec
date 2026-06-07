@@ -60,10 +60,7 @@ pub async fn ejecutar_watch(
             .values()
             .filter(|e| **e == EstadoModelo::Grabando)
             .count();
-        let mut slots_disponibles = config
-            .watch
-            .max_simultaneous
-            .saturating_sub(grabando_ahora);
+        let mut slots_disponibles = config.watch.max_simultaneous.saturating_sub(grabando_ahora);
 
         let cooldown = Duration::from_secs(config.watch.cooldown_tras_fallo_secs);
 
@@ -124,8 +121,8 @@ pub async fn ejecutar_watch(
                         return (nombre_clone, None, false);
                     }
 
-                    let ruta = config_clone
-                        .get_output_path(nombre_clone.as_str(), raiz_clone.as_deref());
+                    let ruta =
+                        config_clone.get_output_path(nombre_clone.as_str(), raiz_clone.as_deref());
 
                     let salida_p = Arc::clone(&salida_clone);
                     let nombre_p = nombre_clone.clone();
