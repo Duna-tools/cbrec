@@ -10,6 +10,10 @@ pub struct WatchConfig {
     pub idle_threshold_mins: u64,
     pub max_simultaneous: usize,
     pub cooldown_tras_fallo_secs: u64,
+    pub ask_timeout_secs: u64,
+    pub desktop_notify: bool,
+    pub notif_titulo: String,
+    pub notif_cuerpo: String,
 }
 
 impl Default for WatchConfig {
@@ -20,6 +24,10 @@ impl Default for WatchConfig {
             idle_threshold_mins: 30,
             max_simultaneous: 3,
             cooldown_tras_fallo_secs: 300,
+            ask_timeout_secs: 5,
+            desktop_notify: true,
+            notif_titulo: "cbrec".to_string(),
+            notif_cuerpo: "{modelo}".to_string(),
         }
     }
 }
@@ -51,7 +59,7 @@ impl Default for AppConfig {
         };
         Self {
             output_root,
-            min_file_size: 262_144_000, // 250 MiB
+            min_file_size: 262_144_000,
             naming_template: "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
                 .to_string(),
             watch: WatchConfig::default(),
@@ -60,53 +68,73 @@ impl Default for AppConfig {
     }
 }
 
+fn config_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "cbrec").map(|p| p.config_dir().to_path_buf())
+}
+
 impl AppConfig {
     pub fn load() -> Self {
         let mut config = Self::default();
 
-        let ruta_config = ProjectDirs::from("", "", "cbrec")
-            .map(|p| p.config_dir().join("config.toml"))
+        let ruta_config = config_dir()
+            .map(|d| d.join("config.toml"))
             .filter(|p| p.exists());
 
         if let Some(ruta_config) = ruta_config {
-            if let Ok(contenido) = fs::read_to_string(&ruta_config) {
-                if let Ok(file_config) = toml::from_str::<FileConfig>(&contenido) {
-                    if let Some(general) = file_config.general {
-                        if let Some(output_root) = general.output_root {
-                            config.output_root = expandir_tilde(&output_root);
+            match fs::read_to_string(&ruta_config) {
+                Err(e) => eprintln!("[WARN] No se pudo leer config.toml: {}", e),
+                Ok(contenido) => match toml::from_str::<FileConfig>(&contenido) {
+                    Err(e) => eprintln!("[WARN] config.toml inválido: {}", e),
+                    Ok(file_config) => {
+                        if let Some(general) = file_config.general {
+                            if let Some(v) = general.output_root {
+                                config.output_root = expandir_tilde(&v);
+                            }
+                            if let Some(v) = general.min_file_size {
+                                config.min_file_size = v;
+                            }
                         }
-                        if let Some(min_file_size) = general.min_file_size {
-                            config.min_file_size = min_file_size;
+                        if let Some(naming) = file_config.naming {
+                            if let Some(v) = naming.template {
+                                config.naming_template = v;
+                            }
+                        }
+                        if let Some(w) = file_config.watch {
+                            if let Some(v) = w.poll_interval_secs {
+                                config.watch.poll_interval_secs = v;
+                            }
+                            if let Some(v) = w.poll_interval_idle_secs {
+                                config.watch.poll_interval_idle_secs = v;
+                            }
+                            if let Some(v) = w.idle_threshold_mins {
+                                config.watch.idle_threshold_mins = v;
+                            }
+                            if let Some(v) = w.max_simultaneous {
+                                config.watch.max_simultaneous = v;
+                            }
+                            if let Some(v) = w.cooldown_tras_fallo_secs {
+                                config.watch.cooldown_tras_fallo_secs = v;
+                            }
+                            if let Some(v) = w.ask_timeout_secs {
+                                config.watch.ask_timeout_secs = v;
+                            }
+                            if let Some(v) = w.desktop_notify {
+                                config.watch.desktop_notify = v;
+                            }
+                            if let Some(v) = w.notif_titulo {
+                                config.watch.notif_titulo = v;
+                            }
+                            if let Some(v) = w.notif_cuerpo {
+                                config.watch.notif_cuerpo = v;
+                            }
+                        }
+                        if let Some(auth) = file_config.auth {
+                            if let Some(v) = auth.session_cookie {
+                                config.auth.session_cookie = Some(v);
+                            }
                         }
                     }
-                    if let Some(naming) = file_config.naming {
-                        if let Some(template) = naming.template {
-                            config.naming_template = template;
-                        }
-                    }
-                    if let Some(watch) = file_config.watch {
-                        if let Some(v) = watch.poll_interval_secs {
-                            config.watch.poll_interval_secs = v;
-                        }
-                        if let Some(v) = watch.poll_interval_idle_secs {
-                            config.watch.poll_interval_idle_secs = v;
-                        }
-                        if let Some(v) = watch.idle_threshold_mins {
-                            config.watch.idle_threshold_mins = v;
-                        }
-                        if let Some(v) = watch.max_simultaneous {
-                            config.watch.max_simultaneous = v;
-                        }
-                        if let Some(v) = watch.cooldown_tras_fallo_secs {
-                            config.watch.cooldown_tras_fallo_secs = v;
-                        }
-                    }
-                    if let Some(auth) = file_config.auth {
-                        if let Some(cookie) = auth.session_cookie {
-                            config.auth.session_cookie = Some(cookie);
-                        }
-                    }
-                }
+                },
             }
         }
 
@@ -140,6 +168,59 @@ impl AppConfig {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Default)]
+pub struct WatchedModels {
+    pub models: Vec<String>,
+}
+
+impl WatchedModels {
+    fn path() -> Option<PathBuf> {
+        config_dir().map(|d| d.join("watched.toml"))
+    }
+
+    pub fn load() -> Self {
+        let Some(path) = Self::path() else {
+            return Self::default();
+        };
+        let Ok(contenido) = fs::read_to_string(&path) else {
+            return Self::default();
+        };
+        match toml::from_str::<WatchedModels>(&contenido) {
+            Ok(m) => m,
+            Err(e) => {
+                eprintln!("[WARN] watched.toml inválido: {}", e);
+                Self::default()
+            }
+        }
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, "Sin directorio de config")
+        })?;
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let contenido = toml::to_string(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        fs::write(&path, contenido)
+    }
+
+    pub fn add(&mut self, modelo: &str) -> bool {
+        if self.models.iter().any(|m| m == modelo) {
+            return false;
+        }
+        self.models.push(modelo.to_owned());
+        true
+    }
+
+    pub fn remove(&mut self, modelo: &str) -> bool {
+        let antes = self.models.len();
+        self.models.retain(|m| m != modelo);
+        self.models.len() < antes
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct FileConfig {
     general: Option<GeneralConfig>,
@@ -166,6 +247,10 @@ struct WatchFileConfig {
     idle_threshold_mins: Option<u64>,
     max_simultaneous: Option<usize>,
     cooldown_tras_fallo_secs: Option<u64>,
+    ask_timeout_secs: Option<u64>,
+    desktop_notify: Option<bool>,
+    notif_titulo: Option<String>,
+    notif_cuerpo: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -185,7 +270,6 @@ pub(crate) fn expandir_tilde(ruta: &str) -> PathBuf {
             return home.join(resto);
         }
     }
-
     PathBuf::from(ruta_normalizada)
 }
 
@@ -204,11 +288,33 @@ mod tests {
         assert_eq!(cfg.poll_interval_idle_secs, 300);
         assert_eq!(cfg.idle_threshold_mins, 30);
         assert_eq!(cfg.max_simultaneous, 3);
+        assert_eq!(cfg.ask_timeout_secs, 5);
+        assert!(cfg.desktop_notify);
+        assert_eq!(cfg.notif_titulo, "cbrec");
+        assert_eq!(cfg.notif_cuerpo, "{modelo}");
     }
 
     #[test]
     fn auth_config_por_defecto_sin_cookie() {
         let cfg = AuthConfig::default();
         assert!(cfg.session_cookie.is_none());
+    }
+
+    #[test]
+    fn watched_models_add_dedup() {
+        let mut w = WatchedModels::default();
+        assert!(w.add("alice"));
+        assert!(!w.add("alice"));
+        assert_eq!(w.models.len(), 1);
+    }
+
+    #[test]
+    fn watched_models_remove() {
+        let mut w = WatchedModels {
+            models: vec!["alice".into(), "bob".into()],
+        };
+        assert!(w.remove("alice"));
+        assert!(!w.remove("carol"));
+        assert_eq!(w.models, vec!["bob"]);
     }
 }

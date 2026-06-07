@@ -1,10 +1,11 @@
-use crate::application::commands::{check, list, record};
+use crate::application::commands::{add, check, list, record, remove};
 use crate::application::utils::{
-    aplicar_ffmpeg_path, resolver_ruta_opcional, validar_ffmpeg, ParametrosGrabacion,
+    aplicar_ffmpeg_path, extraer_nombre, resolver_ruta_opcional, validar_ffmpeg,
+    ParametrosGrabacion,
 };
 use crate::application::watch_service;
 use crate::domain::value_objects::{ModelName, VideoQuality};
-use crate::infrastructure::{AppConfig, ChaturbateClient};
+use crate::infrastructure::{AppConfig, ChaturbateClient, WatchedModels};
 use crate::presentation::{Cli, Commands, ConsoleOutput, Output};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -14,7 +15,7 @@ const LIMITE_CONCURRENCIA_DEFECTO: usize = 3;
 
 pub async fn ejecutar_cli(
     cli: Cli,
-    config: AppConfig,
+    mut config: AppConfig,
     client: ChaturbateClient,
 ) -> anyhow::Result<()> {
     let Cli {
@@ -82,16 +83,50 @@ pub async fn ejecutar_cli(
         Some(Commands::Watch {
             modelos,
             ask,
+            timeout,
             output,
             quality,
         }) => {
-            let modelos_vobj = modelos
+            // Override timeout from CLI si se especificó
+            if let Some(t) = timeout {
+                config.watch.ask_timeout_secs = t;
+            }
+
+            // Resolver lista de modelos: CLI o watched.toml
+            let nombres_resolvidos: Vec<String> = if modelos.is_empty() {
+                let watched = WatchedModels::load();
+                if watched.models.is_empty() {
+                    anyhow::bail!(
+                        "Sin modelos. Usa 'cbrec add <modelo>' o especifica modelos en el comando."
+                    );
+                }
+                watched.models
+            } else {
+                // Guardar en watched.toml
+                let mut watched = WatchedModels::load();
+                let mut cambio = false;
+                for m in &modelos {
+                    if watched.add(&extraer_nombre(m)) {
+                        cambio = true;
+                    }
+                }
+                if cambio {
+                    let _ = watched.save();
+                }
+                modelos
+            };
+
+            let modelos_vobj = nombres_resolvidos
                 .iter()
-                .map(|m| ModelName::try_from(m.as_str()))
+                .map(|m| ModelName::try_from(extraer_nombre(m).as_str()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| anyhow::anyhow!(e))?;
+
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
             let raiz_salida = resolver_ruta_opcional(output);
+
+            validar_ffmpeg(ruta_ffmpeg.as_deref()).await?;
+            let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
 
             watch_service::ejecutar_watch(
                 Arc::new(client),
@@ -105,6 +140,8 @@ pub async fn ejecutar_cli(
             )
             .await
         }
+        Some(Commands::Add { models }) => add::agregar_modelos(models),
+        Some(Commands::Remove { models }) => remove::eliminar_modelos(models),
         None => {
             if modelos_principales.is_empty() {
                 salida.mostrar_error_sin_modelo();

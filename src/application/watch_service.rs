@@ -1,12 +1,14 @@
 use crate::application::recording::{descargar_grabacion, ruta_parcial, ResultadoGrabacion};
+use crate::domain::errors::DomainError;
 use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::{EstadoModelo, ModelName, StreamUrl, VideoQuality};
-use crate::infrastructure::{AppConfig, ChaturbateClient};
+use crate::infrastructure::{AppConfig, ChaturbateClient, InfrastructureError, WatchConfig};
 use crate::presentation::Output;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::io::AsyncBufReadExt;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
@@ -30,14 +32,15 @@ pub async fn ejecutar_watch(
         .collect();
 
     let mut omitidos: HashSet<String> = HashSet::new();
+    let mut invalidos: HashSet<String> = HashSet::new();
     let mut fallos: HashMap<String, Instant> = HashMap::new();
     let mut grabaciones: JoinSet<(String, Option<PathBuf>, bool)> = JoinSet::new();
 
-    let mut ultima_actividad: Instant = Instant::now()
+    let mut ultima_actividad = Instant::now()
         .checked_sub(Duration::from_secs(
             config.watch.idle_threshold_mins * 60 + 1,
         ))
-        .unwrap_or(Instant::now());
+        .unwrap_or_else(Instant::now);
 
     loop {
         while let Some(Ok((modelo, ruta_final, hubo_error))) = grabaciones.try_join_next() {
@@ -61,110 +64,116 @@ pub async fn ejecutar_watch(
             .filter(|e| **e == EstadoModelo::Grabando)
             .count();
         let mut slots_disponibles = config.watch.max_simultaneous.saturating_sub(grabando_ahora);
-
         let cooldown = Duration::from_secs(config.watch.cooldown_tras_fallo_secs);
 
+        // Checks de estado en paralelo
+        let mut checks: JoinSet<(String, Result<Option<StreamUrl>, InfrastructureError>)> =
+            JoinSet::new();
+
         for modelo in &modelos {
-            if *cancel_rx.borrow() {
-                break;
-            }
-
             let nombre = modelo.as_str().to_string();
-
             if estados.get(&nombre) == Some(&EstadoModelo::Grabando) {
                 continue;
             }
-            if omitidos.contains(&nombre) {
+            if omitidos.contains(&nombre) || invalidos.contains(&nombre) {
                 continue;
             }
             if fallos.get(&nombre).is_some_and(|t| t.elapsed() < cooldown) {
                 continue;
             }
+            let client_c = Arc::clone(&client);
+            let m = modelo.clone();
+            checks
+                .spawn(async move { (m.as_str().to_string(), client_c.get_stream_url(&m).await) });
+        }
 
-            let stream_url: Option<StreamUrl> = match client.get_stream_url(modelo).await {
-                Ok(opt) => opt,
-                Err(err) => {
-                    eprintln!("[WARN][{}] Error al consultar estado: {}", nombre, err);
-                    None
+        let mut online: Vec<(String, StreamUrl)> = Vec::new();
+        while let Some(Ok((nombre, resultado))) = checks.join_next().await {
+            match resultado {
+                Ok(Some(url)) => {
+                    ultima_actividad = Instant::now();
+                    salida.watch_tick_online(&nombre);
+                    online.push((nombre, url));
                 }
-            };
+                Ok(None) => salida.watch_tick_offline(&nombre),
+                Err(InfrastructureError::Domain(DomainError::ModelNotFound(_))) => {
+                    salida.error_fallo_grabacion(
+                        &nombre,
+                        "modelo no encontrado, eliminado de monitoreo",
+                    );
+                    invalidos.insert(nombre);
+                }
+                Err(e) => eprintln!("[WARN][{}] Error al consultar estado: {}", nombre, e),
+            }
+        }
 
-            if let Some(stream_url) = stream_url {
-                ultima_actividad = Instant::now();
-                salida.watch_tick_online(&nombre);
+        // Decisiones de grabación (secuencial para manejar stdin/slots)
+        for (nombre, stream_url) in online {
+            if *cancel_rx.borrow() || slots_disponibles == 0 {
+                break;
+            }
 
-                if slots_disponibles == 0 {
-                    continue;
+            if ask && !preguntar_con_timeout(&nombre, &config.watch).await {
+                salida.watch_modelo_omitido(&nombre);
+                omitidos.insert(nombre);
+                continue;
+            }
+
+            salida.watch_inicio_grabacion(&nombre);
+            estados.insert(nombre.clone(), EstadoModelo::Grabando);
+            slots_disponibles = slots_disponibles.saturating_sub(1);
+
+            let client_clone = Arc::clone(&client);
+            let config_clone = Arc::clone(&config);
+            let salida_clone = Arc::clone(&salida);
+            let raiz_clone = raiz_salida.clone();
+            let cancel_clone = cancel_rx.clone();
+            let nombre_clone = nombre.clone();
+
+            grabaciones.spawn(async move {
+                if *cancel_clone.borrow() {
+                    return (nombre_clone, None, false);
                 }
 
-                if ask {
-                    let confirmar = salida.watch_pregunta_grabar(&nombre);
-                    if !confirmar {
-                        salida.watch_modelo_omitido(&nombre);
-                        omitidos.insert(nombre.clone());
-                        continue;
-                    }
-                }
+                let ruta =
+                    config_clone.get_output_path(nombre_clone.as_str(), raiz_clone.as_deref());
 
-                salida.watch_inicio_grabacion(&nombre);
-                estados.insert(nombre.clone(), EstadoModelo::Grabando);
-
-                let client_clone = Arc::clone(&client);
-                let config_clone = Arc::clone(&config);
-                let salida_clone = Arc::clone(&salida);
-                let raiz_clone = raiz_salida.clone();
-                let cancel_clone = cancel_rx.clone();
-                let nombre_clone = nombre.clone();
-
-                grabaciones.spawn(async move {
-                    if *cancel_clone.borrow() {
-                        return (nombre_clone, None, false);
-                    }
-
-                    let ruta =
-                        config_clone.get_output_path(nombre_clone.as_str(), raiz_clone.as_deref());
-
-                    let salida_p = Arc::clone(&salida_clone);
-                    let nombre_p = nombre_clone.clone();
-                    let parcial_p = ruta_parcial(&ruta);
-                    let progress_task = tokio::spawn(async move {
-                        loop {
-                            tokio::time::sleep(Duration::from_secs(5)).await;
-                            if let Ok(meta) = tokio::fs::metadata(&parcial_p).await {
-                                salida_p.mostrar_progreso_grabacion(&nombre_p, meta.len());
-                            }
-                        }
-                    });
-
-                    let result = descargar_grabacion(
-                        &client_clone,
-                        &stream_url,
-                        ruta,
-                        quality,
-                        config_clone.min_file_size,
-                    )
-                    .await;
-                    progress_task.abort();
-
-                    match result {
-                        Ok(ResultadoGrabacion::Guardado(p)) => (nombre_clone, Some(p), false),
-                        Ok(ResultadoGrabacion::Pequeno(p, _)) => (nombre_clone, Some(p), false),
-                        Ok(ResultadoGrabacion::Cancelado) => (nombre_clone, None, false),
-                        Err(e) => {
-                            salida_clone.error_fallo_grabacion(&nombre_clone, &e.to_string());
-                            (nombre_clone, None, true)
+                let salida_p = Arc::clone(&salida_clone);
+                let nombre_p = nombre_clone.clone();
+                let parcial_p = ruta_parcial(&ruta);
+                let progress_task = tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if let Ok(meta) = tokio::fs::metadata(&parcial_p).await {
+                            salida_p.mostrar_progreso_grabacion(&nombre_p, meta.len());
                         }
                     }
                 });
-                slots_disponibles = slots_disponibles.saturating_sub(1);
-            } else {
-                salida.watch_tick_offline(&nombre);
-            }
+
+                let result = descargar_grabacion(
+                    &client_clone,
+                    &stream_url,
+                    ruta,
+                    quality,
+                    config_clone.min_file_size,
+                )
+                .await;
+                progress_task.abort();
+
+                match result {
+                    Ok(ResultadoGrabacion::Guardado(p)) => (nombre_clone, Some(p), false),
+                    Ok(ResultadoGrabacion::Pequeno(p, _)) => (nombre_clone, Some(p), false),
+                    Ok(ResultadoGrabacion::Cancelado) => (nombre_clone, None, false),
+                    Err(e) => {
+                        salida_clone.error_fallo_grabacion(&nombre_clone, &e.to_string());
+                        (nombre_clone, None, true)
+                    }
+                }
+            });
         }
 
         let tiempo_idle = ultima_actividad.elapsed();
         let umbral_idle = Duration::from_secs(config.watch.idle_threshold_mins * 60);
-
         let intervalo_secs = if tiempo_idle >= umbral_idle {
             config.watch.poll_interval_idle_secs
         } else {
@@ -184,6 +193,33 @@ pub async fn ejecutar_watch(
     }
 
     Ok(())
+}
+
+async fn preguntar_con_timeout(modelo: &str, cfg: &WatchConfig) -> bool {
+    if cfg.desktop_notify {
+        let cuerpo = cfg.notif_cuerpo.replace("{modelo}", modelo);
+        let _ = tokio::process::Command::new("notify-send")
+            .args(["--urgency=low", &cfg.notif_titulo, &cuerpo])
+            .spawn();
+    }
+
+    print!(
+        "[{}] ¿Grabar? [S/n] (auto en {}s): ",
+        modelo, cfg.ask_timeout_secs
+    );
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+
+    let readline = async {
+        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+        let mut line = String::new();
+        let _ = reader.read_line(&mut line).await;
+        line
+    };
+
+    match tokio::time::timeout(Duration::from_secs(cfg.ask_timeout_secs), readline).await {
+        Err(_) => true,
+        Ok(line) => !line.trim().eq_ignore_ascii_case("n"),
+    }
 }
 
 async fn esperar_cancelacion(mut rx: watch::Receiver<bool>) {

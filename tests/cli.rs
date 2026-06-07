@@ -81,3 +81,50 @@ fn parse_watch_ask_flag() {
         _ => panic!("Se esperaba subcomando watch"),
     }
 }
+
+#[test]
+fn parse_watch_timeout() {
+    let cli = Cli::parse_from(["cbrec", "watch", "alice", "--ask", "--timeout", "30"]);
+    match cli.command {
+        Some(Commands::Watch { timeout, .. }) => assert_eq!(timeout, Some(30)),
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}
+
+#[test]
+fn parse_watch_no_models() {
+    let cli = Cli::parse_from(["cbrec", "watch"]);
+    match cli.command {
+        Some(Commands::Watch { modelos, .. }) => assert!(modelos.is_empty()),
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}
+
+#[test]
+fn parse_add_command() {
+    let cli = Cli::parse_from(["cbrec", "add", "alice", "bob"]);
+    match cli.command {
+        Some(Commands::Add { models }) => assert_eq!(models, vec!["alice", "bob"]),
+        _ => panic!("Se esperaba subcomando add"),
+    }
+}
+
+#[test]
+fn parse_add_url() {
+    let cli = Cli::parse_from(["cbrec", "add", "https://chaturbate.com/alice/"]);
+    match cli.command {
+        Some(Commands::Add { models }) => {
+            assert_eq!(models, vec!["https://chaturbate.com/alice/"])
+        }
+        _ => panic!("Se esperaba subcomando add"),
+    }
+}
+
+#[test]
+fn parse_remove_command() {
+    let cli = Cli::parse_from(["cbrec", "remove", "alice"]);
+    match cli.command {
+        Some(Commands::Remove { models }) => assert_eq!(models, vec!["alice"]),
+        _ => panic!("Se esperaba subcomando remove"),
+    }
+}

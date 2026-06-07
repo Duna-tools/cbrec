@@ -53,6 +53,22 @@ pub(crate) async fn validar_ffmpeg(ruta: Option<&Path>) -> anyhow::Result<()> {
     }
 }
 
+/// Extrae el nombre de usuario de una URL de Chaturbate o devuelve el input sin cambios.
+pub(crate) fn extraer_nombre(input: &str) -> String {
+    if input.starts_with("http") {
+        url::Url::parse(input)
+            .ok()
+            .and_then(|u| {
+                u.path_segments()?
+                    .find(|s| !s.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| input.to_owned())
+    } else {
+        input.to_owned()
+    }
+}
+
 pub(crate) fn deduplicar_modelos(modelos: Vec<String>) -> (Vec<String>, usize) {
     let mut vistos = std::collections::HashSet::new();
     let mut unicos = Vec::new();

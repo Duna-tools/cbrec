@@ -34,6 +34,18 @@ max_simultaneous = 3
 ; Segundos de espera tras un fallo antes de reintentar grabar ese modelo.
 cooldown_tras_fallo_secs = 300
 
+; Segundos de espera antes de auto-grabar cuando --ask esta activo.
+ask_timeout_secs = 5
+
+; Enviar notificacion de escritorio (notify-send) cuando un modelo se conecta.
+desktop_notify = true
+
+; Titulo de la notificacion. Cambiar para mayor discrecion (ej: "Sync", "Build").
+notif_titulo = "cbrec"
+
+; Cuerpo de la notificacion. {modelo} se reemplaza con el nombre del modelo.
+notif_cuerpo = "{modelo}"
+
 [auth]
 ; Cookie de sesión de Chaturbate (opcional).
 ; Permite acceder a rooms privados/fan-only y reduce bloqueos de Cloudflare.

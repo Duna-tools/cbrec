@@ -73,17 +73,34 @@ pub enum Commands {
 
     /// Monitoriza modelos y graba automaticamente cuando se conectan.
     Watch {
-        /// Modelos a monitorizar.
-        #[arg(value_name = "MODEL", num_args = 1..)]
+        /// Modelos a monitorizar (opcional si ya hay lista guardada).
+        #[arg(value_name = "MODEL", num_args = 0..)]
         modelos: Vec<String>,
         /// Pedir confirmacion antes de grabar cada modelo.
         #[arg(long)]
         ask: bool,
+        /// Segundos para auto-grabar si no hay respuesta (solo con --ask).
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
         /// Directorio base de salida.
         #[arg(short, long)]
         output: Option<String>,
         /// Calidad de video (240p, 480p, 720p, 1080p, best).
         #[arg(short, long, default_value = "best")]
         quality: String,
+    },
+
+    /// Añade modelos a la lista de seguimiento persistente.
+    Add {
+        /// Modelos o URLs de Chaturbate.
+        #[arg(value_name = "MODEL_OR_URL", num_args = 1..)]
+        models: Vec<String>,
+    },
+
+    /// Elimina modelos de la lista de seguimiento.
+    Remove {
+        /// Modelos a eliminar.
+        #[arg(value_name = "MODEL", num_args = 1..)]
+        models: Vec<String>,
     },
 }

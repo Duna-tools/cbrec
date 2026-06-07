@@ -1,5 +1,4 @@
 use colored::Colorize;
-use dialoguer;
 use std::path::Path;
 
 pub trait Output: Send + Sync {
@@ -36,7 +35,6 @@ pub trait Output: Send + Sync {
     fn watch_inicio(&self, modelos: &[&str]);
     fn watch_tick_online(&self, modelo: &str);
     fn watch_tick_offline(&self, modelo: &str);
-    fn watch_pregunta_grabar(&self, modelo: &str) -> bool;
     fn watch_inicio_grabacion(&self, modelo: &str);
     fn watch_fin_grabacion(&self, modelo: &str, ruta: &Path);
     fn watch_modelo_omitido(&self, modelo: &str);
@@ -292,14 +290,6 @@ impl Output for ConsoleOutput {
             modelo.cyan(),
             "offline".yellow()
         );
-    }
-
-    fn watch_pregunta_grabar(&self, modelo: &str) -> bool {
-        dialoguer::Confirm::new()
-            .with_prompt(format!("[{}] ¿Grabar a {} ahora?", ahora(), modelo))
-            .default(true)
-            .interact()
-            .unwrap_or(false)
     }
 
     fn watch_inicio_grabacion(&self, modelo: &str) {
