@@ -92,8 +92,8 @@ pub async fn ejecutar_cli(
                 config.watch.ask_timeout_secs = t;
             }
 
-            // Resolver lista de modelos: CLI o watched.toml
-            let nombres_resolvidos: Vec<String> = if modelos.is_empty() {
+            // Normalizar nombres (extrae username de URLs)
+            let nombres: Vec<String> = if modelos.is_empty() {
                 let watched = WatchedModels::load();
                 if watched.models.is_empty() {
                     anyhow::bail!(
@@ -102,25 +102,28 @@ pub async fn ejecutar_cli(
                 }
                 watched.models
             } else {
-                // Guardar en watched.toml
-                let mut watched = WatchedModels::load();
-                let mut cambio = false;
-                for m in &modelos {
-                    if watched.add(&extraer_nombre(m)) {
-                        cambio = true;
-                    }
-                }
-                if cambio {
-                    let _ = watched.save();
-                }
-                modelos
+                modelos.iter().map(|m| extraer_nombre(m)).collect()
             };
 
-            let modelos_vobj = nombres_resolvidos
+            // Validar todos los nombres antes de guardar en watched.toml
+            let modelos_vobj = nombres
                 .iter()
-                .map(|m| ModelName::try_from(extraer_nombre(m).as_str()))
+                .map(|m| ModelName::try_from(m.as_str()))
                 .collect::<Result<Vec<_>, _>>()
                 .map_err(|e| anyhow::anyhow!(e))?;
+
+            // Guardar solo si vienen de CLI (no de watched.toml)
+            if !modelos.is_empty() {
+                let mut watched = WatchedModels::load();
+                let cambio = modelos_vobj
+                    .iter()
+                    .fold(false, |acc, m| watched.add(m.as_str()) || acc);
+                if cambio {
+                    if let Err(e) = watched.save() {
+                        eprintln!("[WARN] No se pudo guardar lista de modelos: {}", e);
+                    }
+                }
+            }
 
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
             let raiz_salida = resolver_ruta_opcional(output);
