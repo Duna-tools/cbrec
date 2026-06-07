@@ -115,9 +115,10 @@ pub async fn ejecutar_cli(
             // Guardar solo si vienen de CLI (no de watched.toml)
             if !modelos.is_empty() {
                 let mut watched = WatchedModels::load();
-                let cambio = modelos_vobj
-                    .iter()
-                    .fold(false, |acc, m| watched.add(m.as_str()) || acc);
+                let mut cambio = false;
+                for m in &modelos_vobj {
+                    cambio |= watched.add(m.as_str());
+                }
                 if cambio {
                     if let Err(e) = watched.save() {
                         eprintln!("[WARN] No se pudo guardar lista de modelos: {}", e);
