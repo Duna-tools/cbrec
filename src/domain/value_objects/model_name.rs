@@ -2,16 +2,10 @@ use crate::domain::errors::DomainError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Nombre de modelo normalizado y validado.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ModelName(String);
 
 impl ModelName {
-    /// Crea un nombre de modelo valido y normalizado.
-    /// # Arguments
-    /// - `name`: nombre crudo del modelo.
-    /// # Errors
-    /// - `DomainError::InvalidModelName` si el formato es invalido.
     pub fn new(name: impl Into<String>) -> Result<Self, DomainError> {
         let name = name.into().trim().to_lowercase();
 
@@ -21,16 +15,13 @@ impl ModelName {
             ));
         }
 
-        if name.len() > 100 {
+        if name.len() > 20 {
             return Err(DomainError::InvalidModelName(
                 "Model name too long".to_string(),
             ));
         }
 
-        if !name
-            .chars()
-            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
-        {
+        if !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
             return Err(DomainError::InvalidModelName(
                 "Model name contains invalid characters".to_string(),
             ));
@@ -39,7 +30,6 @@ impl ModelName {
         Ok(Self(name))
     }
 
-    /// Devuelve el nombre como `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -103,14 +93,14 @@ mod tests {
 
     #[test]
     fn test_model_name_too_long_fails() {
-        let long_name = "a".repeat(101);
+        let long_name = "a".repeat(21);
         let result = ModelName::new(long_name);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_model_name_invalid_characters_fails() {
-        let invalid_names = vec!["model@name", "model name", "model.name"];
+        let invalid_names = vec!["model@name", "model name", "model.name", "model-name"];
 
         for name in invalid_names {
             let result = ModelName::new(name);

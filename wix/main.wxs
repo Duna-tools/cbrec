@@ -1,8 +1,31 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  wix/main.wxs — Instalador MSI para cbrec (Windows x86_64)
+
+  UpgradeCode: FIJO para toda la vida del producto.
+  Nunca lo cambies o Windows no podrá detectar upgrades.
+
+  Product Id="*" → WiX genera un nuevo GUID por build (correcto para MSI).
+-->
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
-  <Product Id="*" Name="cbrec" Language="1033" Version="0.0.2" Manufacturer="Duna Tools" UpgradeCode="11111111-2222-3333-4444-555555555555">
-    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
-    <MediaTemplate />
+  <Product
+    Id="*"
+    Name="cbrec"
+    Language="1033"
+    Version="0.0.2"
+    Manufacturer="Duna Tools"
+    UpgradeCode="D4A7E291-3F8C-4B6D-9E2A-F015C83B7461">
+
+    <Package
+      InstallerVersion="500"
+      Compressed="yes"
+      InstallScope="perMachine" />
+
+    <!-- Detecta versiones anteriores y las desinstala antes de instalar -->
+    <MajorUpgrade
+      DowngradeErrorMessage="Una versión más nueva de cbrec ya está instalada." />
+
+    <MediaTemplate EmbedCab="yes" />
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="ProgramFiles64Folder">
@@ -11,13 +34,29 @@
     </Directory>
 
     <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
-      <Component Id="cmp_cbrec_exe" Guid="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" Win64="yes">
-        <File Id="fil_cbrec_exe" Source="$(var.CargoTargetBinDir)\cbrec.exe" KeyPath="yes" />
+      <Component
+        Id="cmp_cbrec_exe"
+        Guid="6C1B8F3E-A924-4D71-BE5F-920374561C8D"
+        Win64="yes">
+        <File
+          Id="fil_cbrec_exe"
+          Source="$(var.CargoTargetBinDir)\cbrec.exe"
+          KeyPath="yes" />
+        <!-- Agrega el directorio de instalación al PATH del sistema -->
+        <Environment
+          Id="env_PATH"
+          Name="PATH"
+          Value="[INSTALLFOLDER]"
+          Permanent="no"
+          Part="last"
+          Action="set"
+          System="yes" />
       </Component>
     </ComponentGroup>
 
     <Feature Id="DefaultFeature" Level="1">
       <ComponentGroupRef Id="ProductComponents" />
     </Feature>
+
   </Product>
 </Wix>

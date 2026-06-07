@@ -1,6 +1,5 @@
 use clap::{Parser, Subcommand};
 
-/// Parametros de linea de comandos.
 #[derive(Parser)]
 #[command(name = "cbrec")]
 #[command(author, version, about = "Grabador de streams simple y eficiente")]
@@ -33,11 +32,24 @@ pub struct Cli {
     #[arg(short = 'j', long, default_value_t = 3, global = true)]
     pub jobs: usize,
 
+    /// Cookie de sesion de Chaturbate (sobreescribe config).
+    /// Ejemplo: "PHPSESSID=abc123; chaturbatesid=xyz"
+    /// Obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
+    #[arg(long, global = true, value_name = "COOKIE")]
+    pub session_cookie: Option<String>,
+
+    /// Suprime output informativo. Solo muestra errores y resultados finales.
+    #[arg(long, global = true, conflicts_with = "verbose")]
+    pub quiet: bool,
+
+    /// Muestra informacion detallada siempre.
+    #[arg(short = 'v', long, global = true, conflicts_with = "quiet")]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
 
-/// Subcomandos disponibles.
 #[derive(Subcommand)]
 pub enum Commands {
     /// Graba un modelo o URL.
@@ -58,4 +70,21 @@ pub enum Commands {
         /// Nombre del modelo.
         model: String,
     },
+
+    /// Monitoriza modelos y graba automaticamente cuando se conectan.
+    Watch {
+        /// Modelos a monitorizar.
+        #[arg(value_name = "MODEL", num_args = 1..)]
+        modelos: Vec<String>,
+        /// Pedir confirmacion antes de grabar cada modelo.
+        #[arg(long)]
+        ask: bool,
+        /// Directorio base de salida.
+        #[arg(short, long)]
+        output: Option<String>,
+        /// Calidad de video (240p, 480p, 720p, 1080p, best).
+        #[arg(short, long, default_value = "best")]
+        quality: String,
+    },
 }
+

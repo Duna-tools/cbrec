@@ -1,0 +1,43 @@
+[general]
+; Directorio base donde se guardarán las grabaciones.
+; Se crea cb_rec/<modelo> dentro de esta ruta.
+; Windows: C:\Users\<usuario>\Videos
+; Linux: /home/<usuario>/Videos
+output_root = ~/Videos
+
+; Tamaño mínimo de archivo (bytes). Archivos menores se marcan como parciales.
+; 250 MiB por defecto: 262144000
+min_file_size = 262144000
+
+[naming]
+; Plantilla para nombres de archivo.
+; Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+
+; Alternativas:
+; template = {model}/{year}-{month}-{day}_{hour}h{minute}m.mp4
+; template = {year}/{month}/{model}_{day}_{hour}{minute}.mp4
+
+[watch]
+; Intervalo de polling cuando hay actividad reciente (segundos).
+poll_interval_secs = 60
+
+; Intervalo de polling cuando todos los modelos llevan mucho tiempo offline (segundos).
+poll_interval_idle_secs = 300
+
+; Minutos sin actividad para entrar en modo idle.
+idle_threshold_mins = 30
+
+; Máximo de grabaciones simultáneas en modo watch.
+max_simultaneous = 3
+
+; Segundos de espera tras un fallo antes de reintentar grabar ese modelo.
+cooldown_tras_fallo_secs = 300
+
+[auth]
+; Cookie de sesión de Chaturbate (opcional).
+; Permite acceder a rooms privados/fan-only y reduce bloqueos de Cloudflare.
+; Cómo obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
+; Copia el valor de la cookie completa. Ejemplo:
+; session_cookie = "PHPSESSID=abc123xyz; chaturbatesid=def456"
+

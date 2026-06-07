@@ -1,7 +1,6 @@
 use crate::domain::errors::DomainError;
 use thiserror::Error;
 
-/// Errores de infraestructura.
 #[derive(Error, Debug)]
 pub enum InfrastructureError {
     #[error(transparent)]

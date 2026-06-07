@@ -2,11 +2,11 @@ name: Build & Release
 
 on:
   push:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
     tags:
       - "v*"
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [main, master, develop]
   workflow_dispatch:
 
 concurrency:
@@ -20,20 +20,23 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # ─────────────────────────────────────────────────────────
+  # 1. TEST — corre en cada push / PR en los 3 sistemas
+  # ─────────────────────────────────────────────────────────
   test:
-    name: Test
+    name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Rust (stable)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           components: rustfmt, clippy
 
@@ -46,111 +49,159 @@ jobs:
 
       - name: Run clippy (ubuntu only)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
       - name: Run tests
         run: cargo test --locked --verbose
 
+  # ─────────────────────────────────────────────────────────
+  # 2. AUDIT — verifica vulnerabilidades en dependencias
+  # ─────────────────────────────────────────────────────────
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run audit
+        run: cargo audit
+
+  # ─────────────────────────────────────────────────────────
+  # 3. PACKAGE — compila y empaqueta para cada plataforma
+  #    Se activa con tags v* o workflow_dispatch manual
+  # ─────────────────────────────────────────────────────────
   package:
-    name: Package (${{ matrix.os }})
+    name: Package (${{ matrix.dist_prefix }})
     needs: test
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          # Linux — Debian (.deb) + Fedora (.rpm) + binario
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             dist_prefix: cbrec-linux-x86_64
-          - os: windows-latest
+
+          # Windows — instalador (.msi) + portable (.exe)
+          - runner: windows-latest
             target: x86_64-pc-windows-msvc
             dist_prefix: cbrec-windows-x86_64
+
+          # macOS Intel
+          - runner: macos-13
+            target: x86_64-apple-darwin
+            dist_prefix: cbrec-macos-x86_64
+
+          # macOS Apple Silicon (M1/M2/M3)
+          - runner: macos-latest
+            target: aarch64-apple-darwin
+            dist_prefix: cbrec-macos-aarch64
 
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Setup Rust (stable + target)
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           targets: ${{ matrix.target }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
-      # --- Guard: tag version matches Cargo.toml version ---
-      - name: Verify tag matches Cargo.toml (bash)
+      # ── Verificar que el tag coincide con Cargo.toml ──────
+      - name: Verify tag vs Cargo.toml (bash)
         if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"          # e.g. v1.2.3
+          tag="${{ github.ref_name }}"
           ver="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)"
           if [[ "v${ver}" != "${tag}" ]]; then
             echo "ERROR: Tag (${tag}) != Cargo.toml version (v${ver})"
             exit 1
           fi
 
-      - name: Verify tag matches Cargo.toml (pwsh)
+      - name: Verify tag vs Cargo.toml (pwsh)
         if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"  # v1.2.3
-          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"' | Select-Object -First 1).Line
+          $tag = "${{ github.ref_name }}"
+          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"' |
+                  Select-Object -First 1).Line
           $ver = ($ver -split '"')[1]
           if ("v$ver" -ne $tag) {
             Write-Error "ERROR: Tag ($tag) != Cargo.toml version (v$ver)"
             exit 1
           }
 
-      # --- Build release binary ---
+      # ── Build release ─────────────────────────────────────
       - name: Build (release)
-        if: runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --release --locked --target ${{ matrix.target }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Build (release) - Windows
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo build --release --locked --target ${{ matrix.target }}
-
-      # --- Package Linux: .deb + .rpm ---
+      # ── Package: Linux (.deb + .rpm + binario) ────────────
       - name: Install packaging tools (Linux)
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          sudo apt-get update -qq
           sudo apt-get install -y rpm
           cargo install cargo-deb cargo-generate-rpm --locked
 
-      - name: Build .deb + .rpm (Linux)
+      - name: Package Linux
         if: runner.os == 'Linux'
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p dist
 
-          # Binary
-          cp "target/${{ matrix.target }}/release/cbrec" "dist/${{ matrix.dist_prefix }}"
+          # Binario sin extension
+          cp "target/${{ matrix.target }}/release/cbrec" \
+             "dist/${{ matrix.dist_prefix }}"
 
-          # DEB (write straight to dist with a stable name)
-          cargo deb --no-build --locked --target ${{ matrix.target }} --output "dist/${{ matrix.dist_prefix }}.deb"
+          # .deb (Debian / Ubuntu)
+          cargo deb --no-build --locked \
+            --target ${{ matrix.target }} \
+            --output "dist/${{ matrix.dist_prefix }}.deb"
 
-          # RPM: write directly to dist with a stable name
-          cargo generate-rpm --target ${{ matrix.target }} --output \"dist/${{ matrix.dist_prefix }}.rpm\"
+          # .rpm (Fedora / RHEL / openSUSE)
+          cargo generate-rpm \
+            --target ${{ matrix.target }} \
+            --output "dist/${{ matrix.dist_prefix }}.rpm"
 
-      # --- Package Windows: .msi (cargo-wix) ---
+      # ── Package: macOS (.tar.gz) ──────────────────────────
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/${{ matrix.dist_prefix }}.tar.gz" \
+            -C "target/${{ matrix.target }}/release" cbrec
+
+      # ── Package: Windows (.msi + .exe) ────────────────────
       - name: Install WiX Toolset (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install wixtoolset --no-progress -y
-          $wixDir = Get-ChildItem "C:\Program Files (x86)" -Directory -Filter "WiX Toolset*" | Sort-Object Name -Descending | Select-Object -First 1
+          $wixDir = Get-ChildItem "C:\Program Files (x86)" -Directory `
+            -Filter "WiX Toolset*" |
+            Sort-Object Name -Descending | Select-Object -First 1
           if (-not $wixDir) { throw "WiX Toolset folder not found" }
           Add-Content $env:GITHUB_PATH "$($wixDir.FullName)\bin"
           Add-Content $env:GITHUB_ENV  "WIX=$($wixDir.FullName)\"
@@ -158,29 +209,28 @@ jobs:
       - name: Install cargo-wix (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo install cargo-wix --locked
+        run: cargo install cargo-wix --locked
 
-      - name: Build MSI (Windows)
+      - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
 
-          # Copy EXE as well (useful alongside MSI)
-          Copy-Item "target\${{ matrix.target }}\release\cbrec.exe" "dist\${{ matrix.dist_prefix }}.exe" -Force
+          # Portable .exe
+          Copy-Item "target\${{ matrix.target }}\release\cbrec.exe" `
+            "dist\${{ matrix.dist_prefix }}.exe" -Force
 
-          # Ensure wix/main.wxs exists (skip init if already present)
-          if (-not (Test-Path "wix\\main.wxs")) {
-            cargo wix init
-          } else {
-            Write-Host "wix/main.wxs exists; skipping cargo wix init"
-          }
+          # wix/main.wxs ya existe en el repo
+          if (-not (Test-Path "wix\main.wxs")) { cargo wix init }
 
-          # Build MSI (lands in target\wix\*.msi)
+          # Generar .msi
           cargo wix --target ${{ matrix.target }} --nocapture
 
-          $msi = Get-ChildItem -Path @("target\${{ matrix.target }}\wix","target\wix") -Filter "*.msi" -Recurse | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          $msi = Get-ChildItem `
+            -Path @("target\${{ matrix.target }}\wix", "target\wix") `
+            -Filter "*.msi" -Recurse |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "MSI not found under target\wix" }
           Copy-Item $msi.FullName "dist\${{ matrix.dist_prefix }}.msi" -Force
 
@@ -191,9 +241,57 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # ─────────────────────────────────────────────────────────
+  # 4. PKGBUILD — genera el PKGBUILD para Arch Linux / AUR
+  #    Solo corre en tags v*
+  # ─────────────────────────────────────────────────────────
+  pkgbuild:
+    name: Generate Arch PKGBUILD
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Generate PKGBUILD from template
+        shell: bash
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          VER="${VERSION#v}"
+          URL="https://github.com/Duna-tools/cbrec/archive/refs/tags/v${VER}.tar.gz"
+
+          # Descargar el tarball para calcular el checksum real
+          curl -fsSL -o "cbrec-${VER}.tar.gz" "$URL"
+          SHA="$(sha256sum "cbrec-${VER}.tar.gz" | awk '{print $1}')"
+
+          mkdir -p dist
+          sed \
+            -e "s/@@VERSION@@/${VER}/g" \
+            -e "s/@@SHA256@@/${SHA}/g" \
+            -e "s|@@URL@@|${URL}|g" \
+            packaging/arch/PKGBUILD.template > dist/PKGBUILD
+
+          echo "Generated PKGBUILD for v${VER} (sha256: ${SHA})"
+          cat dist/PKGBUILD
+
+      - name: Upload PKGBUILD artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dist-arch-pkgbuild
+          path: dist/PKGBUILD
+          if-no-files-found: error
+
+  # ─────────────────────────────────────────────────────────
+  # 5. RELEASE — crea la GitHub Release con todos los assets
+  #    Solo corre en tags v*, después de package y pkgbuild
+  # ─────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
-    needs: package
+    needs: [package, pkgbuild]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -201,7 +299,7 @@ jobs:
 
     steps:
       - name: Download all dist artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: dist-*
           path: dist
@@ -213,6 +311,7 @@ jobs:
           set -euo pipefail
           cd dist
           sha256sum * > SHA256SUMS
+          cat SHA256SUMS
 
       - name: Create release notes
         shell: bash
@@ -220,44 +319,54 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          cat > release_notes.md <<EOF
-          Release ${VERSION}
+          cat > release_notes.md << EOF
+          ## Release ${VERSION}
 
-          Assets produced by CI:
-          - Debian/Ubuntu (.deb)
-          - Fedora/RHEL (.rpm)
-          - Windows (.msi) + portable .exe
-          - SHA256SUMS (integrity verification)
+          ### Instalación
 
-          Verificación (Linux/macOS):
-          \`\`\`bash
-          # Descarga los archivos + SHA256SUMS en la misma carpeta
-          sha256sum -c SHA256SUMS
-          \`\`\`
-
-          Instalación (ejemplos):
-
-          Debian/Ubuntu:
+          **Debian / Ubuntu**
           \`\`\`bash
           sudo dpkg -i cbrec-linux-x86_64.deb
           \`\`\`
 
-          Fedora:
+          **Fedora / RHEL / openSUSE**
           \`\`\`bash
           sudo rpm -i cbrec-linux-x86_64.rpm
           \`\`\`
 
-          Windows:
-          - Ejecuta cbrec-windows-x86_64.msi
-          - Alternativo portable: cbrec-windows-x86_64.exe
+          **Arch Linux**
+          \`\`\`bash
+          # Descarga el PKGBUILD adjunto, colócalo en una carpeta vacía y ejecuta:
+          makepkg -si
+          \`\`\`
+
+          **macOS Intel (x86_64)**
+          \`\`\`bash
+          tar -xzf cbrec-macos-x86_64.tar.gz
+          sudo mv cbrec /usr/local/bin/
+          \`\`\`
+
+          **macOS Apple Silicon (M1/M2/M3)**
+          \`\`\`bash
+          tar -xzf cbrec-macos-aarch64.tar.gz
+          sudo mv cbrec /usr/local/bin/
+          \`\`\`
+
+          **Windows**
+          - Instalador: ejecuta \`cbrec-windows-x86_64.msi\`
+          - Portable: copia \`cbrec-windows-x86_64.exe\` a cualquier carpeta en tu PATH
+
+          ### Verificación de integridad
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          \`\`\`
           EOF
 
-      - name: Create GitHub Release and upload assets
-        uses: softprops/action-gh-release@v2
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body_path: release_notes.md
-          files: |
-            dist/*
+          files: dist/*
           fail_on_unmatched_files: true

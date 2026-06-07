@@ -1,154 +1,284 @@
 # cbrec
 
-Grabador de streams simple y eficiente escrito en Rust.
+Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 
-## Descripcion
+## Descripción
 
-cbrec permite grabar streams de Chaturbate de forma sencilla. Solo proporciona el nombre del modelo o la URL y comienza a grabar inmediatamente.
+**cbrec** permite grabar streams de Chaturbate de forma sencilla. Proporciona el nombre del modelo y comienza a grabar inmediatamente. Con el comando `watch` puedes monitorizar varios modelos en segundo plano y que graben automáticamente cuando se conecten.
 
-Caracteristicas principales:
-- Grabacion directa sin configuracion previa
-- Deteccion automatica de finalizacion de stream
-- Manejo de Ctrl+C para detencion limpia
-- Indicador de progreso en tiempo real
-- Arquitectura DDD/Onion modular y extensible
+### Características
 
-## Instalacion
+| Característica | Descripción |
+|---|---|
+| Grabación directa | Sin configuración previa, arranca al instante |
+| Daemon watch | Monitoriza modelos y graba automáticamente al conectarse |
+| Autenticación | Soporte de cookie de sesión para rooms privados/fan-only |
+| Polling adaptativo | Intervalo corto con actividad, largo cuando todo está offline |
+| Modo confirmación | `--ask` para pedir permiso antes de grabar cada modelo |
+| Grabaciones paralelas | Hasta N modelos simultáneos configurable |
+| Shutdown limpio | Ctrl+C detiene grabaciones activas correctamente |
+| Bajo consumo | ~3–5 MB RAM en reposo, 0% CPU durmiendo entre ciclos |
+| DDD/Onion | Arquitectura modular y extensible |
+
+---
+
+## Instalación
+
+### Binarios precompilados (recomendado)
+
+Descarga el binario para tu plataforma desde la [página de releases](https://github.com/Duna-tools/cbrec/releases):
+
+| Plataforma | Archivo |
+|---|---|
+| Linux x86_64 | `cbrec_linux_amd64.tar.gz` |
+| Linux x86_64 (Debian/Ubuntu) | `cbrec_*.deb` |
+| Linux x86_64 (Fedora/RHEL) | `cbrec_*.rpm` |
+| Linux (Arch) | `PKGBUILD` (ver instrucciones abajo) |
+| macOS x86_64 | `cbrec_macos_x86_64.tar.gz` |
+| macOS Apple Silicon | `cbrec_macos_aarch64.tar.gz` |
+| Windows x86_64 | `cbrec_*.msi` o `cbrec.exe` |
+
+#### Arch Linux (PKGBUILD)
+```bash
+# Descarga el PKGBUILD del release y ejecuta:
+makepkg -si
+```
+
+### Compilar desde fuentes
+
+**Requisitos:** Rust 1.70+, ffmpeg en PATH
 
 ```bash
-# Clonar el repositorio
 git clone https://github.com/Duna-tools/cbrec.git
 cd cbrec
-
-# Compilar
 cargo build --release
-
-# El binario estara en target/release/cbrec
+# Binario en: target/release/cbrec
 ```
+
+---
 
 ## Uso
 
-### Grabacion directa (uso principal)
+### Grabación directa
 
 ```bash
-# Por nombre de modelo
+# Grabar un modelo (detección automática de calidad)
 cbrec nombremodelo
+
+# Grabar varios modelos en paralelo
+cbrec alice bob charlie
 
 # Con directorio de salida personalizado
 cbrec nombremodelo -o ~/mis_videos
 
-# Por URL completa
-cbrec https://chaturbate.com/nombremodelo/
+# Elegir calidad de video
+cbrec nombremodelo -q 720p
+
+# Con ruta a ffmpeg personalizada
+cbrec nombremodelo --ffmpeg-path /usr/local/bin/ffmpeg
 ```
 
-Ejemplo de salida:
+### Daemon de monitorización — `watch`
+
+Monitoriza modelos indefinidamente y graba automáticamente cuando se conectan.
+
+```bash
+# Monitorizar y grabar automáticamente
+cbrec watch alice bob charlie
+
+# Pedir confirmación antes de grabar cada modelo
+cbrec watch alice bob --ask
+
+# Con directorio y calidad personalizados
+cbrec watch alice bob -o ~/grabaciones -q 1080p
+
+# Con cookie de sesión (rooms privados/fan-only)
+cbrec watch alice bob --session-cookie "PHPSESSID=abc123; chaturbatesid=xyz"
 ```
-=== cbrec - Stream Recorder ===
 
-Modelo: nombremodelo
-Verificando disponibilidad...
-Modelo online
-
-Archivo: /home/user/Videos/captures/2026.01.26_14.30.00_nombremodelo.mp4
-
-Iniciando grabacion...
+Ejemplo de salida en consola (log cronológico):
+```
+=== cbrec watch iniciado ===
+Monitorizando: alice, bob
 Presiona Ctrl+C para detener
 
----
-Descargado: 45.23 MB | Velocidad: 2.15 MB/s
+[14:30:01][alice] offline
+[14:30:01][bob] offline
+[14:30:01] Próximo ciclo en 60 s
+[14:31:01][alice] ONLINE detectado
+[14:31:01][alice] Iniciando grabacion...
+[14:31:01][bob] offline
+[14:31:01] Próximo ciclo en 60 s
+[14:32:01][alice] grabando...
+[14:32:01][bob] offline
+...
+^C
+[14:45:22] Deteniendo daemon watch...
+[14:45:22][alice] Grabacion finalizada → /home/user/Videos/cb_rec/alice/2026.06.02_14.31.01_alice.mp4
+```
 
-Deteniendo grabacion...
-
-Grabacion finalizada:
-  Tamano: 156.78 MB
-  Duracion: 00:15:47
-
-Archivo guardado: /home/user/Videos/captures/2026.01.26_14.30.00_nombremodelo.mp4
+Con `--ask`:
+```
+[14:31:01][alice] ONLINE detectado
+[14:31:01] ¿Grabar a alice ahora? [Y/n]: y
+[14:31:02][alice] Iniciando grabacion...
 ```
 
 ### Comandos auxiliares
 
 ```bash
-# Verificar si un modelo esta online
+# Verificar si un modelo está online
 cbrec check nombremodelo
 
-# Grabar explicitamente (equivalente al uso directo)
-cbrec record nombremodelo
+# Grabar explícitamente (equivalente al uso directo)
+cbrec record alice bob
+
+# Listar calidades disponibles
+cbrec alice -l
+
+# Ver ayuda
+cbrec --help
+cbrec watch --help
 ```
 
-## Configuracion
+### Autenticación con cuenta de Chaturbate
 
-Por defecto las grabaciones se guardan en `~/Videos/captures` con el formato:
-```
-{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+Para acceder a rooms privados o de fan-club, o para reducir bloqueos de Cloudflare durante el polling:
+
+**Opción 1 — Flag en línea de comandos:**
+```bash
+cbrec watch alice --session-cookie "PHPSESSID=valor; chaturbatesid=valor"
 ```
 
-Archivo de configuracion: `config/default.toml`
+**Opción 2 — Archivo de configuración (permanente):**
+```toml
+# ~/.config/cbrec/config.toml
+[auth]
+session_cookie = "PHPSESSID=valor; chaturbatesid=valor"
+```
+
+**Cómo obtener la cookie:**
+1. Inicia sesión en chaturbate.com en tu navegador
+2. Abre DevTools → F12
+3. Ve a **Application** → **Cookies** → `https://chaturbate.com`
+4. Copia los valores de `PHPSESSID` y `chaturbatesid`
+
+> **Nota:** La cookie funciona para todos los subcomandos: `watch`, `record` y `check`.
+
+---
+
+## Configuración
+
+Archivo: `~/.config/cbrec/config.toml`
 
 ```toml
 [general]
-output_dir = "~/Videos/captures"
-min_file_size = 1024  # bytes, archivos menores se eliminan
+# Directorio base donde se guardarán las grabaciones.
+# Se crea cb_rec/<modelo> dentro de esta ruta.
+output_root = ~/Videos
+
+# Tamaño mínimo de archivo (bytes). Archivos menores se mueven a /small.
+# 250 MiB por defecto
+min_file_size = 262144000
 
 [naming]
-template = "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
+# Plantilla para nombres de archivo.
+# Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+
+[watch]
+# Intervalo de polling cuando hay actividad reciente (segundos)
+poll_interval_secs = 60
+
+# Intervalo de polling cuando todos llevan mucho tiempo offline (segundos)
+poll_interval_idle_secs = 300
+
+# Minutos sin actividad para entrar en modo idle
+idle_threshold_mins = 30
+
+# Máximo de grabaciones simultáneas en modo watch
+max_simultaneous = 3
+
+[auth]
+# Cookie de sesión de Chaturbate (opcional)
+# session_cookie = "PHPSESSID=abc123; chaturbatesid=xyz"
 ```
+
+---
 
 ## Arquitectura
 
-El proyecto sigue una arquitectura Onion/DDD con separacion clara de responsabilidades:
+El proyecto sigue una arquitectura **Onion/DDD** con separación clara de responsabilidades:
 
 ```
 src/
-├── domain/           # Logica de negocio pura
-│   ├── value_objects/  # ModelName, StreamUrl
-│   ├── repositories/   # Traits (interfaces)
-│   └── errors/         # Errores de dominio
-├── infrastructure/   # Implementaciones concretas
-│   ├── external/       # ChaturbateClient, HLS downloader
-│   └── config/         # Configuracion
-└── presentation/     # Interfaz de usuario
-    └── cli/            # Comandos CLI
+├── domain/                  # Lógica de negocio pura
+│   ├── value_objects/       # ModelName, StreamUrl, VideoQuality, EstadoModelo
+│   ├── repositories/        # Traits (StreamRepository)
+│   └── errors.rs            # Errores de dominio
+├── infrastructure/          # Implementaciones concretas
+│   ├── external/            # ChaturbateClient (HTTP + HLS + session_cookie)
+│   └── config/              # AppConfig (WatchConfig, AuthConfig)
+├── application/             # Orquestación de casos de uso
+│   ├── cli_controller.rs    # Despacho de comandos CLI
+│   └── watch_service.rs     # Daemon de monitorización
+└── presentation/            # Interfaz de usuario
+    ├── cli/commands.rs      # Definición de comandos (clap)
+    └── output.rs            # Salida en consola
 ```
 
-Ver `doc/ANALISIS_Y_ESPECIFICACION.md` para especificacion completa.
+---
 
 ## Desarrollo
 
 ```bash
-# Compilar debug build
+# Debug build
 cargo build
 
-# Ejecutar tests
+# Tests
 cargo test
 
-# Ejecutar con logs detallados
-RUST_LOG=debug ./target/debug/cbrec modelname
-
-# Build optimizado de produccion
+# Release optimizado
 cargo build --release
+
+# Logs detallados
+RUST_LOG=debug ./target/debug/cbrec nombremodelo
 ```
+
+---
 
 ## Troubleshooting
 
-**El modelo no se encuentra online:**
+**El modelo no está online:**
 ```
-Error: El modelo 'nombremodelo' no esta online o no se pudo obtener el stream
-
+[ERROR] El modelo 'nombremodelo' no esta online o no se pudo obtener el stream
 Puedes verificar el estado con: cbrec check nombremodelo
 ```
-Verifica que el nombre del modelo sea correcto y que este transmitiendo en el sitio.
+Verifica que el nombre sea correcto y que esté transmitiendo.
 
-**Error de permisos al escribir archivo:**
-Asegurate de tener permisos de escritura en el directorio de salida configurado.
+**Archivo muy pequeño / movido a /small:**
+El stream duró muy poco (< 250 MB por defecto). Ajusta `min_file_size` en la config si necesitas conservar clips cortos.
 
-**Error de red/timeout:**
-El cliente reintenta automaticamente 3 veces. Si persiste, verifica tu conexion a internet.
+**Error de red / timeout:**
+El cliente reintenta automáticamente con backoff exponencial. Si persiste, verifica tu conexión.
+
+**Bloqueo de Cloudflare en modo watch:**
+Configura una `session_cookie` válida para reducir la probabilidad de bloqueo (ver sección de autenticación).
+
+**`ffmpeg` no encontrado:**
+```bash
+# Especifica la ruta manualmente
+cbrec nombremodelo --ffmpeg-path /ruta/a/ffmpeg
+```
+
+---
 
 ## Requisitos
 
-- Rust 1.70+
-- Conexion a internet
+- **ffmpeg** — en el PATH del sistema o especificado con `--ffmpeg-path`
+- Conexión a internet
+
+---
 
 ## Licencia
 

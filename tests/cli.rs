@@ -54,3 +54,25 @@ fn parse_check_flag() {
     let cli = Cli::parse_from(["cbrec", "alice", "-c"]);
     assert!(cli.verificar);
 }
+
+#[test]
+fn parse_watch_command() {
+    let cli = Cli::parse_from(["cbrec", "watch", "alice", "bob", "-q", "720p"]);
+    match cli.command {
+        Some(Commands::Watch { modelos, ask, quality, .. }) => {
+            assert_eq!(modelos, vec!["alice", "bob"]);
+            assert!(!ask);
+            assert_eq!(quality, "720p");
+        }
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}
+
+#[test]
+fn parse_watch_ask_flag() {
+    let cli = Cli::parse_from(["cbrec", "watch", "alice", "--ask"]);
+    match cli.command {
+        Some(Commands::Watch { ask, .. }) => assert!(ask),
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}

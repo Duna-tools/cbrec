@@ -25,5 +25,8 @@ Thumbs.db
 # Config overrides
 config.local.toml
 
+# Tools
+codedb.snapshot
+
 # Documentation
 doc/

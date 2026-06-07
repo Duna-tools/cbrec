@@ -1,36 +1,33 @@
 use crate::domain::errors::DomainError;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use url::Url;
 
-/// URL de stream validada.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamUrl(String);
 
 impl StreamUrl {
-    /// Crea una URL de stream valida.
-    /// # Arguments
-    /// - `url`: URL cruda del stream.
-    /// # Errors
-    /// - `DomainError::InvalidStreamUrl` si el formato es invalido.
     pub fn new(url: impl Into<String>) -> Result<Self, DomainError> {
         let url = url.into().trim().to_string();
 
-        if url.is_empty() {
+        let parsed = Url::parse(&url)
+            .map_err(|_| DomainError::InvalidStreamUrl("Invalid URL format".to_string()))?;
+
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return Err(DomainError::InvalidStreamUrl(
-                "URL cannot be empty".to_string(),
+                "URL must use http or https".to_string(),
             ));
         }
 
-        if !url.starts_with("http://") && !url.starts_with("https://") {
+        if parsed.host().is_none() {
             return Err(DomainError::InvalidStreamUrl(
-                "URL must start with http:// or https://".to_string(),
+                "URL must have a host".to_string(),
             ));
         }
 
         Ok(Self(url))
     }
 
-    /// Devuelve la URL como `&str`.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -100,5 +97,15 @@ mod tests {
     fn test_stream_url_try_from() {
         let result = StreamUrl::try_from("https://test.com/video.m3u8");
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_stream_url_sin_host_falla() {
+        assert!(StreamUrl::new("https://").is_err());
+    }
+
+    #[test]
+    fn test_stream_url_con_espacio_falla() {
+        assert!(StreamUrl::new("https:// not valid").is_err());
     }
 }
