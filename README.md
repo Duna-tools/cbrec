@@ -36,7 +36,7 @@ Descarga el binario para tu plataforma desde la [página de releases](https://gi
 | Linux (Arch) | `PKGBUILD` (ver instrucciones abajo) |
 | macOS x86_64 | `cbrec_macos_x86_64.tar.gz` |
 | macOS Apple Silicon | `cbrec_macos_aarch64.tar.gz` |
-| Windows x86_64 | `cbrec_*.msi` o `cbrec.exe` |
+| Windows x86_64 | `cbrec_*.msi`, `cbrec_*_portable.zip` o `cbrec.exe` |
 
 #### Arch Linux (PKGBUILD)
 ```bash
@@ -74,9 +74,17 @@ cbrec nombremodelo -o ~/mis_videos
 # Elegir calidad de video
 cbrec nombremodelo -q 720p
 
+# Grabar un clip corto de 20 segundos
+cbrec --duration 20 nombremodelo
+
 # Con ruta a ffmpeg personalizada
 cbrec nombremodelo --ffmpeg-path /usr/local/bin/ffmpeg
+
+# Con variable de entorno
+CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec nombremodelo
 ```
+
+La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
 
 ### Daemon de monitorización — `watch`
 
@@ -132,6 +140,9 @@ cbrec check nombremodelo
 
 # Grabar explícitamente (equivalente al uso directo)
 cbrec record alice bob
+
+# Grabar explícitamente un clip de 20 segundos
+cbrec record alice --duration 20
 
 # Listar calidades disponibles
 cbrec alice -l
@@ -257,7 +268,7 @@ Puedes verificar el estado con: cbrec check nombremodelo
 Verifica que el nombre sea correcto y que esté transmitiendo.
 
 **Archivo muy pequeño / movido a /small:**
-El stream duró muy poco (< 250 MB por defecto). Ajusta `min_file_size` en la config si necesitas conservar clips cortos.
+El stream duró muy poco o ffmpeg no recibió suficientes datos para una grabación normal (< 250 MB por defecto). Ajusta `min_file_size` en la config si quieres cambiar ese umbral. Para clips cortos intencionales, usa `--duration`; esos clips se guardan como archivos normales si ffmpeg termina correctamente.
 
 **Error de red / timeout:**
 El cliente reintenta automáticamente con backoff exponencial. Si persiste, verifica tu conexión.
@@ -269,13 +280,19 @@ Configura una `session_cookie` válida para reducir la probabilidad de bloqueo (
 ```bash
 # Especifica la ruta manualmente
 cbrec nombremodelo --ffmpeg-path /ruta/a/ffmpeg
+
+# O usa la variable de entorno
+CBREC_FFMPEG=/ruta/a/ffmpeg cbrec nombremodelo
 ```
+
+En Windows, el instalador `.msi` y el paquete `portable.zip` incluyen `ffmpeg.exe`.
+El binario `cbrec.exe` suelto requiere tener FFmpeg instalado o configurar la ruta.
 
 ---
 
 ## Requisitos
 
-- **ffmpeg** — en el PATH del sistema o especificado con `--ffmpeg-path`
+- **ffmpeg** — incluido en Windows MSI/portable zip, en el PATH del sistema, especificado con `--ffmpeg-path` o con `CBREC_FFMPEG`
 - Conexión a internet
 
 ---

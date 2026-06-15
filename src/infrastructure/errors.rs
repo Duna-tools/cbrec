@@ -9,6 +9,9 @@ pub enum InfrastructureError {
     #[error("External service error: {0}")]
     ExternalService(String),
 
+    #[error("HTTP request failed with status: {0}")]
+    HttpStatus(u16),
+
     #[error("Recording error: {0}")]
     RecordingError(String),
 

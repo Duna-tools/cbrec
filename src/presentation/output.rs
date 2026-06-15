@@ -12,6 +12,13 @@ pub trait Output: Send + Sync {
     fn mostrar_error_sin_modelo(&self);
     fn advertir_modelos_duplicados(&self, duplicados: usize);
     fn advertir_modelos_sobre_limite(&self, total: usize, limite: usize);
+    fn advertir_no_se_pudo_guardar_lista(&self, error: &str);
+    fn advertir_error_consulta_estado(&self, modelo: &str, error: &str);
+    fn advertir_config(&self, warning: &str);
+    fn modelo_agregado(&self, modelo: &str);
+    fn modelo_ya_en_lista(&self, modelo: &str);
+    fn modelo_eliminado(&self, modelo: &str);
+    fn modelo_no_encontrado_en_lista(&self, modelo: &str);
     fn error_fallo_grabacion(&self, modelo: &str, error: &str);
     fn error_tarea_abortada(&self, error: &str);
     fn mostrar_inicio_detallado(&self, modelo: &str, calidad: &str);
@@ -29,6 +36,7 @@ pub trait Output: Send + Sync {
     fn mostrar_archivo_guardado_resumido(&self, modelo: &str, ruta: &Path);
     fn mostrar_inicio_verificacion(&self, modelo: &str);
     fn mostrar_estado_modelo(&self, modelo: &str, online: bool);
+    fn mostrar_estado_modelo_detalle(&self, _modelo: &str, _estado: &str, _detalle: &str) {}
     fn mostrar_modelo_sin_variantes(&self, modelo: &str);
     fn mostrar_calidades(&self, modelo: &str, calidades: &[(Option<u32>, Option<u64>)]);
     fn mostrar_progreso_grabacion(&self, _modelo: &str, _bytes: u64) {}
@@ -99,6 +107,42 @@ impl Output for ConsoleOutput {
             "[WARN]".yellow().bold(),
             total,
             limite
+        );
+    }
+
+    fn advertir_no_se_pudo_guardar_lista(&self, error: &str) {
+        eprintln!("[WARN] No se pudo guardar lista de modelos: {}", error);
+    }
+
+    fn advertir_error_consulta_estado(&self, modelo: &str, error: &str) {
+        eprintln!("[WARN][{}] Error al consultar estado: {}", modelo, error);
+    }
+
+    fn advertir_config(&self, warning: &str) {
+        eprintln!("{} {}", "[WARN]".yellow().bold(), warning);
+    }
+
+    fn modelo_agregado(&self, modelo: &str) {
+        println!("{} Añadido: {}", "[OK]".green().bold(), modelo.cyan());
+    }
+
+    fn modelo_ya_en_lista(&self, modelo: &str) {
+        println!(
+            "{} Ya en lista: {}",
+            "[WARN]".yellow().bold(),
+            modelo.cyan()
+        );
+    }
+
+    fn modelo_eliminado(&self, modelo: &str) {
+        println!("{} Eliminado: {}", "[OK]".green().bold(), modelo.cyan());
+    }
+
+    fn modelo_no_encontrado_en_lista(&self, modelo: &str) {
+        println!(
+            "{} No encontrado: {}",
+            "[WARN]".yellow().bold(),
+            modelo.cyan()
         );
     }
 
@@ -232,6 +276,15 @@ impl Output for ConsoleOutput {
                 "OFFLINE".yellow()
             );
         }
+    }
+
+    fn mostrar_estado_modelo_detalle(&self, modelo: &str, estado: &str, detalle: &str) {
+        println!(
+            "[{}] {}: {}",
+            estado.yellow().bold(),
+            modelo.cyan(),
+            detalle
+        );
     }
 
     fn mostrar_modelo_sin_variantes(&self, modelo: &str) {

@@ -1,28 +1,25 @@
 use crate::application::utils::extraer_nombre;
 use crate::infrastructure::WatchedModels;
-use colored::Colorize;
+use crate::presentation::Output;
 
-pub(crate) fn agregar_modelos(modelos: Vec<String>) -> anyhow::Result<()> {
-    let mut watched = WatchedModels::load();
-    let mut hubo_cambio = false;
+pub(crate) fn agregar_modelos(modelos: Vec<String>, salida: &dyn Output) -> anyhow::Result<()> {
+    let resultado = WatchedModels::update_with_warnings(|watched| {
+        let mut hubo_cambio = false;
 
-    for input in &modelos {
-        let nombre = extraer_nombre(input);
-        if watched.add(&nombre) {
-            println!("{} Añadido: {}", "[OK]".green().bold(), nombre.cyan());
-            hubo_cambio = true;
-        } else {
-            println!(
-                "{} Ya en lista: {}",
-                "[WARN]".yellow().bold(),
-                nombre.cyan()
-            );
+        for input in &modelos {
+            let nombre = extraer_nombre(input);
+            if watched.add(&nombre) {
+                salida.modelo_agregado(&nombre);
+                hubo_cambio = true;
+            } else {
+                salida.modelo_ya_en_lista(&nombre);
+            }
         }
-    }
 
-    if hubo_cambio {
-        watched.save()?;
+        ((), hubo_cambio)
+    })?;
+    for warning in resultado.warnings {
+        salida.advertir_config(&warning.to_string());
     }
-
     Ok(())
 }

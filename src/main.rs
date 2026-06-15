@@ -6,10 +6,10 @@ use clap::Parser;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let config = AppConfig::load();
+    let loaded_config = AppConfig::load_with_warnings();
     let client = ChaturbateClient::new()?;
 
-    ejecutar_cli(cli, config, client).await?;
+    ejecutar_cli(cli, loaded_config.config, loaded_config.warnings, client).await?;
 
     Ok(())
 }

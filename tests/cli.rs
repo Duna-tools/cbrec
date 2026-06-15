@@ -5,7 +5,7 @@ use clap::Parser;
 fn parse_multiple_models_default_jobs() {
     let cli = Cli::parse_from(["cbrec", "alice", "bob"]);
     assert_eq!(cli.modelos, vec!["alice", "bob"]);
-    assert_eq!(cli.jobs, 3);
+    assert_eq!(cli.jobs, None);
     assert!(cli.command.is_none());
 }
 
@@ -13,13 +13,20 @@ fn parse_multiple_models_default_jobs() {
 fn parse_jobs_override_main() {
     let cli = Cli::parse_from(["cbrec", "--jobs", "5", "alice"]);
     assert_eq!(cli.modelos, vec!["alice"]);
-    assert_eq!(cli.jobs, 5);
+    assert_eq!(cli.jobs, Some(5));
+}
+
+#[test]
+fn parse_duration_override_main() {
+    let cli = Cli::parse_from(["cbrec", "--duration", "20", "alice"]);
+    assert_eq!(cli.modelos, vec!["alice"]);
+    assert_eq!(cli.duration, Some(20));
 }
 
 #[test]
 fn parse_record_with_jobs() {
     let cli = Cli::parse_from(["cbrec", "record", "alice", "bob", "--jobs", "4"]);
-    assert_eq!(cli.jobs, 4);
+    assert_eq!(cli.jobs, Some(4));
     match cli.command {
         Some(Commands::Record { modelos, .. }) => {
             assert_eq!(modelos, vec!["alice", "bob"]);
@@ -78,6 +85,16 @@ fn parse_watch_ask_flag() {
     let cli = Cli::parse_from(["cbrec", "watch", "alice", "--ask"]);
     match cli.command {
         Some(Commands::Watch { ask, .. }) => assert!(ask),
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}
+
+#[test]
+fn parse_watch_with_jobs() {
+    let cli = Cli::parse_from(["cbrec", "watch", "alice", "--jobs", "5"]);
+    assert_eq!(cli.jobs, Some(5));
+    match cli.command {
+        Some(Commands::Watch { modelos, .. }) => assert_eq!(modelos, vec!["alice"]),
         _ => panic!("Se esperaba subcomando watch"),
     }
 }

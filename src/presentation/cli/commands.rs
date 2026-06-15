@@ -29,8 +29,12 @@ pub struct Cli {
     pub quality: String,
 
     /// Limite de grabaciones simultaneas.
-    #[arg(short = 'j', long, default_value_t = 3, global = true)]
-    pub jobs: usize,
+    #[arg(short = 'j', long, global = true)]
+    pub jobs: Option<usize>,
+
+    /// Duracion maxima de cada grabacion en segundos.
+    #[arg(long, global = true, value_name = "SECS")]
+    pub duration: Option<u64>,
 
     /// Cookie de sesion de Chaturbate (sobreescribe config).
     /// Ejemplo: "PHPSESSID=abc123; chaturbatesid=xyz"

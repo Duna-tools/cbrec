@@ -98,7 +98,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             dist_prefix: cbrec-linux-x86_64
 
-          # Windows — instalador (.msi) + portable (.exe)
+          # Windows — instalador (.msi) + portable (.zip/.exe)
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
             dist_prefix: cbrec-windows-x86_64
@@ -186,6 +186,16 @@ jobs:
             --target ${{ matrix.target }} \
             --output "dist/${{ matrix.dist_prefix }}.rpm"
 
+      - name: Smoke package Linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod +x "dist/${{ matrix.dist_prefix }}"
+          "dist/${{ matrix.dist_prefix }}" --version
+          test -s "dist/${{ matrix.dist_prefix }}.deb"
+          test -s "dist/${{ matrix.dist_prefix }}.rpm"
+
       # ── Package: macOS (.tar.gz) ──────────────────────────
       - name: Package macOS
         if: runner.os == 'macOS'
@@ -195,6 +205,16 @@ jobs:
           mkdir -p dist
           tar -czf "dist/${{ matrix.dist_prefix }}.tar.gz" \
             -C "target/${{ matrix.target }}/release" cbrec
+
+      - name: Smoke package macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tar -xzf "dist/${{ matrix.dist_prefix }}.tar.gz" -C "$tmp"
+          chmod +x "$tmp/cbrec"
+          "$tmp/cbrec" --version
 
       # ── Package: Windows (.msi + .exe) ────────────────────
       - name: Install WiX Toolset (Windows)
@@ -214,15 +234,55 @@ jobs:
         shell: pwsh
         run: cargo install cargo-wix --locked
 
+      - name: Download FFmpeg LGPL (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $asset = "ffmpeg-n8.1-latest-win64-lgpl-8.1.zip"
+          $baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+          New-Item -ItemType Directory -Force ".ffmpeg" | Out-Null
+
+          Invoke-WebRequest "$baseUrl/checksums.sha256" -OutFile ".ffmpeg/checksums.sha256"
+          Invoke-WebRequest "$baseUrl/$asset" -OutFile ".ffmpeg/$asset"
+
+          $line = Select-String -Path ".ffmpeg/checksums.sha256" -SimpleMatch $asset |
+            Select-Object -First 1
+          if (-not $line) { throw "Checksum not found for $asset" }
+
+          $expected = ($line.Line -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash ".ffmpeg/$asset" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "FFmpeg checksum mismatch. expected=$expected actual=$actual"
+          }
+
+          Expand-Archive ".ffmpeg/$asset" -DestinationPath ".ffmpeg/extracted" -Force
+          $ffmpeg = Get-ChildItem ".ffmpeg/extracted" -Recurse -Filter "ffmpeg.exe" |
+            Select-Object -First 1
+          if (-not $ffmpeg) { throw "ffmpeg.exe not found in $asset" }
+
+          Copy-Item $ffmpeg.FullName "target\${{ matrix.target }}\release\ffmpeg.exe" -Force
+
       - name: Package Windows
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
 
-          # Portable .exe
+          # Portable .exe tradicional
           Copy-Item "target\${{ matrix.target }}\release\cbrec.exe" `
             "dist\${{ matrix.dist_prefix }}.exe" -Force
+
+          # Portable plug and play con FFmpeg incluido
+          $portableDir = "dist\${{ matrix.dist_prefix }}-portable"
+          New-Item -ItemType Directory -Force $portableDir | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\cbrec.exe" $portableDir -Force
+          Copy-Item "target\${{ matrix.target }}\release\ffmpeg.exe" $portableDir -Force
+          Copy-Item "README.md" $portableDir -Force
+          Copy-Item "LICENSE" $portableDir -Force
+          Compress-Archive -Path "$portableDir\*" `
+            -DestinationPath "dist\${{ matrix.dist_prefix }}-portable.zip" -Force
+          Remove-Item $portableDir -Recurse -Force
 
           # wix/main.wxs ya existe en el repo
           if (-not (Test-Path "wix\main.wxs")) { cargo wix init }
@@ -236,6 +296,24 @@ jobs:
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $msi) { throw "MSI not found under target\wix" }
           Copy-Item $msi.FullName "dist\${{ matrix.dist_prefix }}.msi" -Force
+
+      - name: Smoke package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          & "dist\${{ matrix.dist_prefix }}.exe" --version
+          if (-not (Test-Path "dist\${{ matrix.dist_prefix }}.msi")) {
+            throw "MSI artifact not found"
+          }
+
+          $smokeDir = "dist\smoke-portable"
+          Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
+          Expand-Archive "dist\${{ matrix.dist_prefix }}-portable.zip" `
+            -DestinationPath $smokeDir -Force
+          & "$smokeDir\cbrec.exe" --version
+          & "$smokeDir\ffmpeg.exe" -version
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -357,7 +435,8 @@ jobs:
 
           **Windows**
           - Instalador: ejecuta \`cbrec-windows-x86_64.msi\`
-          - Portable: copia \`cbrec-windows-x86_64.exe\` a cualquier carpeta en tu PATH
+          - Portable plug and play: descomprime \`cbrec-windows-x86_64-portable.zip\`
+          - Portable simple: copia \`cbrec-windows-x86_64.exe\` a cualquier carpeta en tu PATH y asegúrate de tener FFmpeg instalado
 
           ### Verificación de integridad
           \`\`\`bash
