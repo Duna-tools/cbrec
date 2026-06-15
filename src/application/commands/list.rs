@@ -1,3 +1,4 @@
+use crate::application::utils::extraer_nombre;
 use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::ModelName;
 use crate::infrastructure::ChaturbateClient;
@@ -9,7 +10,8 @@ pub(crate) async fn listar_calidades_modelos(
     modelos: Vec<String>,
 ) -> anyhow::Result<()> {
     for modelo in modelos {
-        let model_name = ModelName::try_from(modelo.as_str())?;
+        let nombre = extraer_nombre(&modelo);
+        let model_name = ModelName::try_from(nombre.as_str())?;
         let stream_url = client.get_stream_url(&model_name).await?;
         let Some(stream_url) = stream_url else {
             salida.mostrar_estado_modelo(model_name.as_str(), false);

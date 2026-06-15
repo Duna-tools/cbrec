@@ -1,14 +1,23 @@
-use crate::application::recording::{descargar_grabacion, ruta_parcial, ResultadoGrabacion};
+use crate::application::recording::{
+    descargar_grabacion, detener_tarea_progreso, ruta_parcial, ResultadoGrabacion,
+};
 use crate::application::utils::{deduplicar_modelos, ParametrosGrabacion};
-use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::{ModelName, VideoQuality};
-use crate::infrastructure::{AppConfig, ChaturbateClient};
+use crate::infrastructure::{AppConfig, ChaturbateClient, EstadoStream};
 use crate::presentation::Output;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
+
+#[derive(Clone, Copy)]
+struct OpcionesGrabacionModelo<'a> {
+    raiz_salida_override: Option<&'a Path>,
+    quality: VideoQuality,
+    min_file_size: Option<u64>,
+    modo_detallado: bool,
+}
 
 pub(crate) async fn grabar_modelos(
     client: ChaturbateClient,
@@ -20,6 +29,7 @@ pub(crate) async fn grabar_modelos(
         raiz_salida,
         quality,
         limite_concurrencia,
+        min_file_size,
         cancel_rx,
         salida,
     } = parametros;
@@ -80,9 +90,12 @@ pub(crate) async fn grabar_modelos(
                     client.as_ref(),
                     config.as_ref(),
                     &modelo,
-                    raiz_salida.as_deref(),
-                    quality,
-                    modo_detallado,
+                    OpcionesGrabacionModelo {
+                        raiz_salida_override: raiz_salida.as_deref(),
+                        quality,
+                        min_file_size,
+                        modo_detallado,
+                    },
                     Arc::clone(&salida),
                 )
                 .await;
@@ -118,11 +131,16 @@ async fn grabar_modelo(
     client: &ChaturbateClient,
     config: &AppConfig,
     target: &str,
-    raiz_salida_override: Option<&Path>,
-    quality: VideoQuality,
-    modo_detallado: bool,
+    opciones: OpcionesGrabacionModelo<'_>,
     salida: Arc<dyn Output>,
 ) -> anyhow::Result<()> {
+    let OpcionesGrabacionModelo {
+        raiz_salida_override,
+        quality,
+        min_file_size,
+        modo_detallado,
+    } = opciones;
+
     if modo_detallado {
         salida.mostrar_inicio_detallado(target, &quality.to_string());
     } else {
@@ -135,14 +153,32 @@ async fn grabar_modelo(
         salida.mostrar_verificando_disponibilidad();
     }
 
-    let stream_url = client.get_stream_url(&model_name).await?;
-    let Some(stream_url) = stream_url else {
-        if modo_detallado {
-            salida.mostrar_modelo_offline_detallado(model_name.as_str());
-        } else {
-            salida.mostrar_modelo_offline_resumido(model_name.as_str());
+    let stream_url = match client.consultar_estado(&model_name).await? {
+        EstadoStream::Online { stream_url } => stream_url,
+        EstadoStream::Offline => {
+            if modo_detallado {
+                salida.mostrar_modelo_offline_detallado(model_name.as_str());
+            } else {
+                salida.mostrar_modelo_offline_resumido(model_name.as_str());
+            }
+            return Ok(());
         }
-        return Ok(());
+        EstadoStream::RequiereSesion { detalle } => {
+            anyhow::bail!(
+                "{} requiere sesion o acceso privado: {}",
+                model_name,
+                detalle
+            );
+        }
+        EstadoStream::RateLimited => {
+            anyhow::bail!("Chaturbate limito las consultas; reintenta mas tarde");
+        }
+        EstadoStream::Bloqueado { detalle } => {
+            anyhow::bail!("Respuesta bloqueada por Chaturbate: {}", detalle);
+        }
+        EstadoStream::RespuestaInesperada { detalle } => {
+            anyhow::bail!("Respuesta inesperada de Chaturbate: {}", detalle);
+        }
     };
 
     if modo_detallado {
@@ -168,9 +204,8 @@ async fn grabar_modelo(
         }
     });
 
-    let result =
-        descargar_grabacion(client, &stream_url, ruta, quality, config.min_file_size).await;
-    progress_task.abort();
+    let result = descargar_grabacion(client, &stream_url, ruta, quality, min_file_size).await;
+    detener_tarea_progreso(progress_task).await;
 
     match result {
         Ok(ResultadoGrabacion::Guardado(ruta)) => {

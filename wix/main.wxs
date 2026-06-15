@@ -52,6 +52,16 @@
           Action="set"
           System="yes" />
       </Component>
+
+      <Component
+        Id="cmp_ffmpeg_exe"
+        Guid="A2E21458-6F7F-45F4-9117-718C3664228D"
+        Win64="yes">
+        <File
+          Id="fil_ffmpeg_exe"
+          Source="$(var.CargoTargetBinDir)\ffmpeg.exe"
+          KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <Feature Id="DefaultFeature" Level="1">

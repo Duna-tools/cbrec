@@ -1,10 +1,13 @@
 use crate::infrastructure::{expandir_tilde, ChaturbateClient};
 use std::path::{Path, PathBuf};
 
+pub(crate) const FFMPEG_ENV: &str = "CBREC_FFMPEG";
+
 pub(crate) struct ParametrosGrabacion {
     pub raiz_salida: Option<PathBuf>,
     pub quality: crate::domain::value_objects::VideoQuality,
     pub limite_concurrencia: usize,
+    pub min_file_size: Option<u64>,
     pub cancel_rx: tokio::sync::watch::Receiver<bool>,
     pub salida: std::sync::Arc<dyn crate::presentation::Output>,
 }
@@ -13,25 +16,31 @@ pub(crate) fn resolver_ruta_opcional(ruta: Option<String>) -> Option<PathBuf> {
     ruta.map(|r| expandir_tilde(&r))
 }
 
-pub(crate) fn aplicar_ffmpeg_path(
-    client: ChaturbateClient,
-    ruta: Option<PathBuf>,
-) -> ChaturbateClient {
-    match ruta {
-        Some(path) => client.with_ffmpeg_path(path),
-        None => client,
-    }
-}
-
-pub(crate) async fn validar_ffmpeg(ruta: Option<&Path>) -> anyhow::Result<()> {
+pub(crate) fn resolver_ffmpeg_path(ruta: Option<PathBuf>) -> PathBuf {
     if let Some(ruta) = ruta {
-        if !ruta.exists() {
-            anyhow::bail!("Ruta de ffmpeg invalida: {}", ruta.display());
+        return ruta;
+    }
+
+    if let Ok(ruta) = std::env::var(FFMPEG_ENV) {
+        let ruta = ruta.trim();
+        if !ruta.is_empty() {
+            return expandir_tilde(ruta);
         }
     }
 
-    let bin = ruta.unwrap_or_else(|| Path::new("ffmpeg"));
-    let salida = tokio::process::Command::new(bin)
+    buscar_ffmpeg_empaquetado().unwrap_or_else(|| PathBuf::from("ffmpeg"))
+}
+
+pub(crate) fn aplicar_ffmpeg_path(client: ChaturbateClient, ruta: PathBuf) -> ChaturbateClient {
+    client.with_ffmpeg_path(ruta)
+}
+
+pub(crate) async fn validar_ffmpeg(ruta: &Path, requiere_existencia: bool) -> anyhow::Result<()> {
+    if requiere_existencia && !ruta.exists() {
+        anyhow::bail!("Ruta de ffmpeg invalida: {}", ruta.display());
+    }
+
+    let salida = tokio::process::Command::new(ruta)
         .arg("-version")
         .output()
         .await;
@@ -41,6 +50,11 @@ pub(crate) async fn validar_ffmpeg(ruta: Option<&Path>) -> anyhow::Result<()> {
             if output.status.success() {
                 Ok(())
             } else {
+                let detalle = resumen_salida_ffmpeg(&output.stderr)
+                    .or_else(|| resumen_salida_ffmpeg(&output.stdout));
+                if let Some(detalle) = detalle {
+                    anyhow::bail!("ffmpeg respondio con error: {}", detalle);
+                }
                 anyhow::bail!("ffmpeg respondio con error");
             }
         }
@@ -51,6 +65,59 @@ pub(crate) async fn validar_ffmpeg(ruta: Option<&Path>) -> anyhow::Result<()> {
             anyhow::bail!("No se pudo ejecutar ffmpeg: {}", err);
         }
     }
+}
+
+fn buscar_ffmpeg_empaquetado() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    candidatos_ffmpeg_empaquetado(dir)
+        .into_iter()
+        .find(|ruta| ruta.is_file())
+}
+
+fn candidatos_ffmpeg_empaquetado(dir: &Path) -> Vec<PathBuf> {
+    let nombre = nombre_binario_ffmpeg();
+    vec![
+        dir.join(nombre),
+        dir.join("bin").join(nombre),
+        dir.join("ffmpeg").join("bin").join(nombre),
+    ]
+}
+
+fn nombre_binario_ffmpeg() -> &'static str {
+    if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    }
+}
+
+fn resumen_salida_ffmpeg(salida: &[u8]) -> Option<String> {
+    const MAX_CHARS: usize = 600;
+
+    let texto = String::from_utf8_lossy(salida);
+    let mut lineas = Vec::new();
+
+    for linea in texto.lines() {
+        let linea = linea.trim();
+        if linea.is_empty() {
+            continue;
+        }
+        lineas.push(linea.to_string());
+        if lineas.len() >= 4 {
+            break;
+        }
+    }
+
+    let mut resumen = lineas.join(" | ");
+    if resumen.is_empty() {
+        return None;
+    }
+    if resumen.chars().count() > MAX_CHARS {
+        resumen = resumen.chars().take(MAX_CHARS).collect();
+        resumen.push_str("...");
+    }
+    Some(resumen)
 }
 
 /// Extrae el nombre de usuario de una URL de Chaturbate o devuelve el input sin cambios.
@@ -112,5 +179,41 @@ mod tests {
         let (unicos, dups) = deduplicar_modelos(vec!["Alice".into(), "alice".into()]);
         assert_eq!(unicos.len(), 1);
         assert_eq!(dups, 1);
+    }
+
+    #[test]
+    fn extraer_nombre_acepta_url_de_chaturbate() {
+        let nombre = extraer_nombre("https://chaturbate.com/_sofy_smith_/");
+
+        assert_eq!(nombre, "_sofy_smith_");
+    }
+
+    #[test]
+    fn resolver_ffmpeg_path_prefiere_ruta_explicita() {
+        let ruta = resolver_ffmpeg_path(Some(PathBuf::from("/tmp/ffmpeg-custom")));
+
+        assert_eq!(ruta, PathBuf::from("/tmp/ffmpeg-custom"));
+    }
+
+    #[test]
+    fn candidatos_ffmpeg_empaquetado_busca_junto_al_binario() {
+        let dir = Path::new("/opt/cbrec");
+        let nombre = nombre_binario_ffmpeg();
+        let candidatos = candidatos_ffmpeg_empaquetado(dir);
+
+        assert_eq!(candidatos[0], dir.join(nombre));
+        assert_eq!(candidatos[1], dir.join("bin").join(nombre));
+        assert_eq!(candidatos[2], dir.join("ffmpeg").join("bin").join(nombre));
+    }
+
+    #[test]
+    fn resumen_salida_ffmpeg_omite_salida_vacia() {
+        assert_eq!(resumen_salida_ffmpeg(b"\n  \n"), None);
+    }
+
+    #[test]
+    fn resumen_salida_ffmpeg_limita_lineas() {
+        let resumen = resumen_salida_ffmpeg(b"1\n2\n3\n4\n5\n").unwrap();
+        assert_eq!(resumen, "1 | 2 | 3 | 4");
     }
 }
