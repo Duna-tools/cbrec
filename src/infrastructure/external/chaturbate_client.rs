@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::future;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Child;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
@@ -211,11 +211,12 @@ impl StreamRepository for ChaturbateClient {
             .unwrap_or_else(|| Path::new("ffmpeg"));
         let mut command = tokio::process::Command::new(ffmpeg_bin);
         command.kill_on_drop(true);
+        configurar_aislamiento_ffmpeg(&mut command);
         command
-            .arg("-nostdin")
             .arg("-hide_banner")
             .arg("-loglevel")
             .arg("error")
+            .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
 
@@ -408,6 +409,14 @@ impl ChaturbateClient {
         .await
     }
 }
+
+#[cfg(unix)]
+fn configurar_aislamiento_ffmpeg(command: &mut tokio::process::Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configurar_aislamiento_ffmpeg(_command: &mut tokio::process::Command) {}
 
 #[derive(Clone, Debug)]
 struct VarianteStream {
@@ -662,7 +671,9 @@ async fn leer_stderr_ffmpeg(stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>
 }
 
 async fn cancelar_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) {
-    solicitar_cierre_ffmpeg(child);
+    if !solicitar_cierre_ffmpeg_por_stdin(child).await {
+        solicitar_cierre_ffmpeg(child);
+    }
     if tokio::time::timeout(
         Duration::from_secs(FFMPEG_SHUTDOWN_GRACE_SECS),
         child.wait(),
@@ -674,6 +685,14 @@ async fn cancelar_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::Joi
         let _ = child.wait().await;
     }
     let _ = leer_stderr_ffmpeg(stderr_task).await;
+}
+
+async fn solicitar_cierre_ffmpeg_por_stdin(child: &mut Child) -> bool {
+    let Some(mut stdin) = child.stdin.take() else {
+        return false;
+    };
+
+    stdin.write_all(b"q\n").await.is_ok()
 }
 
 async fn esperar_sin_progreso(path: &Path, timeout: Duration, check_interval: Duration) {
