@@ -18,6 +18,12 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_AUDIT_VERSION: 0.22.2
+  CARGO_DEB_VERSION: 3.7.0
+  CARGO_GENERATE_RPM_VERSION: 0.21.0
+  CARGO_WIX_VERSION: 0.3.9
+  FFMPEG_RELEASE_TAG: autobuild-2026-06-09-13-57
+  FFMPEG_ASSET: ffmpeg-n8.1.1-11-ge4c7fbf6c0-win64-lgpl-8.1.zip
 
 jobs:
   # ─────────────────────────────────────────────────────────
@@ -75,7 +81,9 @@ jobs:
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
 
       - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
+        run: |
+          cargo install cargo-audit --version "$CARGO_AUDIT_VERSION" --locked
+          cargo audit --version
 
       - name: Run audit
         run: cargo audit
@@ -86,7 +94,7 @@ jobs:
   # ─────────────────────────────────────────────────────────
   package:
     name: Package (${{ matrix.dist_prefix }})
-    needs: test
+    needs: [test, audit]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -163,7 +171,10 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y rpm
-          cargo install cargo-deb cargo-generate-rpm --locked
+          cargo install cargo-deb --version "$CARGO_DEB_VERSION" --locked
+          cargo install cargo-generate-rpm --version "$CARGO_GENERATE_RPM_VERSION" --locked
+          cargo deb --version
+          cargo generate-rpm --version
 
       - name: Package Linux
         if: runner.os == 'Linux'
@@ -175,6 +186,10 @@ jobs:
           # Binario sin extension
           cp "target/${{ matrix.target }}/release/cbrec" \
              "dist/${{ matrix.dist_prefix }}"
+
+          # Compatibilidad para herramientas de paquete que leen assets desde target/release.
+          mkdir -p target/release
+          cp "target/${{ matrix.target }}/release/cbrec" target/release/cbrec
 
           # .deb (Debian / Ubuntu)
           cargo deb --no-build --locked \
@@ -195,6 +210,8 @@ jobs:
           "dist/${{ matrix.dist_prefix }}" --version
           test -s "dist/${{ matrix.dist_prefix }}.deb"
           test -s "dist/${{ matrix.dist_prefix }}.rpm"
+          dpkg-deb --contents "dist/${{ matrix.dist_prefix }}.deb" | grep -q './usr/bin/cbrec'
+          rpm -qpl "dist/${{ matrix.dist_prefix }}.rpm" | grep -q '/usr/bin/cbrec'
 
       # ── Package: macOS (.tar.gz) ──────────────────────────
       - name: Package macOS
@@ -232,15 +249,18 @@ jobs:
       - name: Install cargo-wix (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo install cargo-wix --locked
+        run: |
+          cargo install cargo-wix --version "$env:CARGO_WIX_VERSION" --locked
+          cargo wix --version
 
       - name: Download FFmpeg LGPL (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $asset = "ffmpeg-n8.1-latest-win64-lgpl-8.1.zip"
-          $baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest"
+          $asset = $env:FFMPEG_ASSET
+          $releaseTag = $env:FFMPEG_RELEASE_TAG
+          $baseUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$releaseTag"
           New-Item -ItemType Directory -Force ".ffmpeg" | Out-Null
 
           Invoke-WebRequest "$baseUrl/checksums.sha256" -OutFile ".ffmpeg/checksums.sha256"
@@ -262,6 +282,8 @@ jobs:
           if (-not $ffmpeg) { throw "ffmpeg.exe not found in $asset" }
 
           Copy-Item $ffmpeg.FullName "target\${{ matrix.target }}\release\ffmpeg.exe" -Force
+          Copy-Item "THIRD_PARTY_NOTICES.md" `
+            "target\${{ matrix.target }}\release\THIRD_PARTY_NOTICES.md" -Force
 
       - name: Package Windows
         if: runner.os == 'Windows'
@@ -280,12 +302,23 @@ jobs:
           Copy-Item "target\${{ matrix.target }}\release\ffmpeg.exe" $portableDir -Force
           Copy-Item "README.md" $portableDir -Force
           Copy-Item "LICENSE" $portableDir -Force
+          Copy-Item "THIRD_PARTY_NOTICES.md" $portableDir -Force
           Compress-Archive -Path "$portableDir\*" `
             -DestinationPath "dist\${{ matrix.dist_prefix }}-portable.zip" -Force
           Remove-Item $portableDir -Recurse -Force
 
-          # wix/main.wxs ya existe en el repo
-          if (-not (Test-Path "wix\main.wxs")) { cargo wix init }
+          # Generar wix/main.wxs desde Cargo.toml para evitar version hardcodeada
+          $versionLine = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"' |
+            Select-Object -First 1).Line
+          if (-not $versionLine) { throw "Version not found in Cargo.toml" }
+          $version = ($versionLine -split '"')[1]
+
+          $template = Get-Content "wix\main.wxs.in" -Raw
+          $mainWxs = $template.Replace("@@VERSION@@", $version)
+          if ($mainWxs.Contains("@@VERSION@@")) {
+            throw "WiX template version placeholder was not replaced"
+          }
+          Set-Content "wix\main.wxs" $mainWxs -Encoding utf8
 
           # Generar .msi
           cargo wix --target ${{ matrix.target }} --nocapture
@@ -314,6 +347,9 @@ jobs:
             -DestinationPath $smokeDir -Force
           & "$smokeDir\cbrec.exe" --version
           & "$smokeDir\ffmpeg.exe" -version
+          if (-not (Test-Path "$smokeDir\THIRD_PARTY_NOTICES.md")) {
+            throw "THIRD_PARTY_NOTICES.md not found in portable zip"
+          }
 
       - name: Upload dist artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -328,7 +364,7 @@ jobs:
   # ─────────────────────────────────────────────────────────
   pkgbuild:
     name: Generate Arch PKGBUILD
-    needs: test
+    needs: [test, audit]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
@@ -437,6 +473,7 @@ jobs:
           - Instalador: ejecuta \`cbrec-windows-x86_64.msi\`
           - Portable plug and play: descomprime \`cbrec-windows-x86_64-portable.zip\`
           - Portable simple: copia \`cbrec-windows-x86_64.exe\` a cualquier carpeta en tu PATH y asegúrate de tener FFmpeg instalado
+          - El MSI y portable plug and play incluyen FFmpeg LGPL desde BtbN/FFmpeg-Builds: \`${FFMPEG_RELEASE_TAG}\` / \`${FFMPEG_ASSET}\`
 
           ### Verificación de integridad
           \`\`\`bash
