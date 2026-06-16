@@ -486,6 +486,12 @@ fn parece_html_o_bloqueo(contenido: &str) -> bool {
 }
 
 fn parsear_variantes(contenido: &str) -> Result<Vec<VarianteStream>, InfrastructureError> {
+    if !contenido.trim_start().starts_with("#EXTM3U") {
+        return Err(InfrastructureError::ExternalService(
+            "Invalid playlist: missing #EXTM3U header".to_string(),
+        ));
+    }
+
     let opciones = ParsingOptionsBuilder::new()
         .with_parsing_for_stream_inf()
         .build();
@@ -785,6 +791,28 @@ hi.m3u8
     }
 
     #[test]
+    fn parsear_variantes_rechaza_html_con_http_ok() {
+        let err = parsear_variantes("<html>access denied</html>").expect_err("playlist invalida");
+
+        assert!(err
+            .to_string()
+            .contains("Invalid playlist: missing #EXTM3U header"));
+    }
+
+    #[test]
+    fn seleccionar_calidad_fallback_a_mas_cercana_superior() {
+        let playlist = "\
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1920x1080
+hi.m3u8
+";
+        let variantes = parsear_variantes(playlist).expect("parse failed");
+        let sel = seleccionar_variante(&variantes, VideoQuality::P720).unwrap();
+
+        assert_eq!(sel.url, "hi.m3u8");
+    }
+
+    #[test]
     fn clasificar_status_http_distingue_respuestas() {
         assert_eq!(clasificar_status_http(StatusCode::OK), EstadoHttp::Ok);
         assert_eq!(
@@ -854,6 +882,13 @@ hi.m3u8
     #[test]
     fn clasificar_contexto_privado_sin_hls_requiere_sesion() {
         let estado = clasificar_chat_video_context(r#"{"room_status":"private","hls_source":""}"#);
+
+        assert!(matches!(estado, EstadoStream::RequiereSesion { .. }));
+    }
+
+    #[test]
+    fn clasificar_contexto_fanclub_sin_hls_requiere_sesion() {
+        let estado = clasificar_chat_video_context(r#"{"room_status":"fanclub","hls_source":""}"#);
 
         assert!(matches!(estado, EstadoStream::RequiereSesion { .. }));
     }
@@ -950,6 +985,71 @@ hi.m3u8
         let estado = client.consultar_estado(&model).await.expect("consulta");
 
         assert!(matches!(estado, EstadoStream::RequiereSesion { .. }));
+        let _ = request_task.await.expect("request task");
+    }
+
+    #[tokio::test]
+    async fn consultar_estado_html_ok_bloqueado_contrato_http() {
+        let Some((base_url, request_task)) =
+            servidor_http_falso(200, "<html>access denied</html>").await
+        else {
+            return;
+        };
+        let mut client = ChaturbateClient::new().expect("crea cliente");
+        client.base_url = base_url;
+        let model = ModelName::try_from("alice").unwrap();
+
+        let estado = client.consultar_estado(&model).await.expect("consulta");
+
+        assert!(matches!(estado, EstadoStream::Bloqueado { .. }));
+        let _ = request_task.await.expect("request task");
+    }
+
+    #[tokio::test]
+    async fn listar_calidades_parsea_playlist_contrato_http() {
+        let playlist = "\
+#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+low.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2800000,RESOLUTION=1920x1080
+hi.m3u8
+";
+        let Some((base_url, request_task)) = servidor_http_falso(200, playlist).await else {
+            return;
+        };
+        let client = ChaturbateClient::new().expect("crea cliente");
+        let master = StreamUrl::try_from(format!("{base_url}/hls/master.m3u8")).unwrap();
+
+        let calidades = client
+            .listar_calidades(&master)
+            .await
+            .expect("lista calidades");
+
+        assert_eq!(calidades.len(), 2);
+        assert_eq!(calidades[0].height, Some(360));
+        assert_eq!(calidades[1].height, Some(1080));
+        let request = request_task.await.expect("request task");
+        assert!(request.starts_with("GET /hls/master.m3u8 HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn listar_calidades_rechaza_html_ok_contrato_http() {
+        let Some((base_url, request_task)) =
+            servidor_http_falso(200, "<html>cloudflare</html>").await
+        else {
+            return;
+        };
+        let client = ChaturbateClient::new().expect("crea cliente");
+        let master = StreamUrl::try_from(format!("{base_url}/hls/master.m3u8")).unwrap();
+
+        let err = client
+            .listar_calidades(&master)
+            .await
+            .expect_err("playlist html debe fallar");
+
+        assert!(err
+            .to_string()
+            .contains("Invalid playlist: missing #EXTM3U header"));
         let _ = request_task.await.expect("request task");
     }
 
