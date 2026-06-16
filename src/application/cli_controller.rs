@@ -1,7 +1,7 @@
 use crate::application::commands::{add, check, doctor, list, record, remove};
 use crate::application::utils::{
     aplicar_ffmpeg_path, normalizar_modelos, resolver_ffmpeg_path, resolver_ruta_opcional,
-    validar_ffmpeg, ParametrosGrabacion, FFMPEG_ENV,
+    validar_ffmpeg, ParametrosGrabacion, FFMPEG_ENV, SESSION_COOKIE_ENV,
 };
 use crate::application::watch_service::{self, ConsoleWatchPrompter, WatchParams};
 use crate::domain::value_objects::VideoQuality;
@@ -36,7 +36,11 @@ pub async fn ejecutar_cli(
     let salida: Arc<dyn Output> = Arc::new(ConsoleOutput::new(verbose, quiet));
     mostrar_config_warnings(salida.as_ref(), &config_warnings);
 
-    let session_cookie_final = cookie_cli.or_else(|| config.auth.session_cookie.clone());
+    let session_cookie_final = resolver_session_cookie(
+        cookie_cli,
+        config.auth.session_cookie.clone(),
+        salida.as_ref(),
+    );
 
     if jobs == Some(0) {
         anyhow::bail!("El limite de concurrencia debe ser mayor a 0");
@@ -220,6 +224,53 @@ fn mostrar_config_warnings(salida: &dyn Output, warnings: &[ConfigWarning]) {
     }
 }
 
+fn resolver_session_cookie(
+    cookie_cli: Option<String>,
+    cookie_config: Option<String>,
+    salida: &dyn Output,
+) -> Option<String> {
+    let (cookie, advertir_cli) = resolver_session_cookie_desde(
+        cookie_cli,
+        std::env::var(SESSION_COOKIE_ENV).ok(),
+        cookie_config,
+    );
+
+    if advertir_cli {
+        salida.advertir_config(
+            "--session-cookie puede quedar visible en historial o listados de procesos; prefiere config.toml o CBREC_SESSION_COOKIE.",
+        );
+    }
+
+    cookie
+}
+
+fn resolver_session_cookie_desde(
+    cookie_cli: Option<String>,
+    cookie_env: Option<String>,
+    cookie_config: Option<String>,
+) -> (Option<String>, bool) {
+    if let Some(cookie) = normalizar_cookie(cookie_cli) {
+        return (Some(cookie), true);
+    }
+
+    if let Some(cookie) = normalizar_cookie(cookie_env) {
+        return (Some(cookie), false);
+    }
+
+    (normalizar_cookie(cookie_config), false)
+}
+
+fn normalizar_cookie(cookie: Option<String>) -> Option<String> {
+    cookie.and_then(|v| {
+        let v = v.trim().to_string();
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -245,5 +296,41 @@ mod tests {
 
         let error = resultado.expect_err("duracion cero debe fallar");
         assert_eq!(error.to_string(), "La duracion debe ser mayor a 0");
+    }
+
+    #[test]
+    fn resolver_session_cookie_prefiere_cli_sobre_entorno_y_config() {
+        let cookie = resolver_session_cookie_desde(
+            Some(" PHPSESSID=cli ".to_string()),
+            Some("PHPSESSID=env".to_string()),
+            Some("PHPSESSID=config".to_string()),
+        );
+
+        assert_eq!(cookie.0.as_deref(), Some("PHPSESSID=cli"));
+        assert!(cookie.1);
+    }
+
+    #[test]
+    fn resolver_session_cookie_usa_entorno_antes_que_config() {
+        let cookie = resolver_session_cookie_desde(
+            None,
+            Some(" PHPSESSID=env ".to_string()),
+            Some("PHPSESSID=config".to_string()),
+        );
+
+        assert_eq!(cookie.0.as_deref(), Some("PHPSESSID=env"));
+        assert!(!cookie.1);
+    }
+
+    #[test]
+    fn resolver_session_cookie_ignora_entorno_vacio() {
+        let cookie = resolver_session_cookie_desde(
+            None,
+            Some("   ".to_string()),
+            Some("PHPSESSID=config".to_string()),
+        );
+
+        assert_eq!(cookie.0.as_deref(), Some("PHPSESSID=config"));
+        assert!(!cookie.1);
     }
 }

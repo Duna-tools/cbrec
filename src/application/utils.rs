@@ -4,6 +4,7 @@ use crate::infrastructure::{expandir_tilde, ChaturbateClient};
 use std::path::{Path, PathBuf};
 
 pub(crate) const FFMPEG_ENV: &str = "CBREC_FFMPEG";
+pub(crate) const SESSION_COOKIE_ENV: &str = "CBREC_SESSION_COOKIE";
 
 pub(crate) struct ParametrosGrabacion {
     pub raiz_salida: Option<PathBuf>,
