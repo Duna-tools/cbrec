@@ -166,19 +166,27 @@ cbrec watch --help
 
 Para acceder a rooms privados o fan-only, o para reducir bloqueos durante el polling, puedes usar una cookie de sesión.
 
-Opción 1, flag en línea de comandos:
-
-```bash
-cbrec watch alice --session-cookie "PHPSESSID=valor; chaturbatesid=valor"
-```
-
-Opción 2, archivo de configuración:
+Opción recomendada, archivo de configuración:
 
 ```toml
 # ~/.config/cbrec/config.toml
 [auth]
 session_cookie = "PHPSESSID=valor; chaturbatesid=valor"
 ```
+
+Opción para scripts o sesiones temporales:
+
+```bash
+CBREC_SESSION_COOKIE="PHPSESSID=valor; chaturbatesid=valor" cbrec watch alice
+```
+
+Opción compatible pero menos segura, flag en línea de comandos:
+
+```bash
+cbrec watch alice --session-cookie "PHPSESSID=valor; chaturbatesid=valor"
+```
+
+Evita `--session-cookie` cuando puedas: puede quedar visible en el historial del shell o en listados de procesos.
 
 Cómo obtener la cookie:
 
@@ -441,19 +449,27 @@ cbrec watch --help
 
 Use a session cookie to access private or fan-only rooms, or to reduce polling blocks.
 
-Option 1, command-line flag:
-
-```bash
-cbrec watch alice --session-cookie "PHPSESSID=value; chaturbatesid=value"
-```
-
-Option 2, configuration file:
+Recommended option, configuration file:
 
 ```toml
 # ~/.config/cbrec/config.toml
 [auth]
 session_cookie = "PHPSESSID=value; chaturbatesid=value"
 ```
+
+Option for scripts or temporary sessions:
+
+```bash
+CBREC_SESSION_COOKIE="PHPSESSID=value; chaturbatesid=value" cbrec watch alice
+```
+
+Compatible but less safe option, command-line flag:
+
+```bash
+cbrec watch alice --session-cookie "PHPSESSID=value; chaturbatesid=value"
+```
+
+Avoid `--session-cookie` when possible: it may be visible in shell history or process listings.
 
 How to get the cookie:
 

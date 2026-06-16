@@ -60,3 +60,6 @@ notif_cuerpo = "{modelo}"
 ; Cómo obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
 ; Copia el valor de la cookie completa. Ejemplo:
 ; session_cookie = "PHPSESSID=abc123xyz; chaturbatesid=def456"
+; Alternativa temporal sin guardarla en disco:
+; CBREC_SESSION_COOKIE="PHPSESSID=abc123xyz; chaturbatesid=def456" cbrec watch modelo
+; Evita --session-cookie cuando puedas: puede quedar visible en historial o procesos.

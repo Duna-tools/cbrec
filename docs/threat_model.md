@@ -46,6 +46,7 @@ Out of scope:
 | File overwrite or partial collision | Recording preflight reserves `.part` files and suffixes colliding outputs |
 | FFmpeg path missing or broken | FFmpeg validation before recording |
 | FFmpeg stderr leaking cookies | Cookie-looking stderr lines are redacted |
+| CLI cookie exposure | `CBREC_SESSION_COOKIE` and config input are documented; CLI cookie use emits a warning |
 | Chaturbate status changes | HTTP status classification and contract tests |
 | Corrupt watched list | Invalid `watched.toml` is backed up and reset |
 | Dependency drift | Dependabot for Cargo and GitHub Actions |
@@ -62,7 +63,6 @@ Out of scope:
 
 ## Hardening Backlog
 
-- Prefer config/env cookie input in docs over CLI cookies.
 - Add more contract tests for playlist variants and blocked responses.
 - Add fuzz/property tests for URL/model normalization and playlist parsing.
 - Consider signed releases if distribution grows beyond personal use.
