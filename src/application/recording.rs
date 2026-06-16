@@ -66,8 +66,8 @@ where
         Err(InfrastructureError::RecordingCancelled) => {
             if !parcial_aprovechable(&parcial).await {
                 limpiar_parcial(&parcial).await;
-                return Ok(ResultadoGrabacion::Cancelado);
             }
+            return Ok(ResultadoGrabacion::Cancelado);
         }
         Err(e) => {
             limpiar_parcial(&parcial).await;
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descargar_grabacion_conserva_parcial_si_se_cancela() {
+    async fn descargar_grabacion_conserva_parcial_sin_renombrar_si_se_cancela() {
         let repo = RepoCanceladoConParcial;
         let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
         let ruta = ruta_temporal("cancelado_con_parcial");
@@ -379,20 +379,10 @@ mod tests {
         )
         .await;
 
-        let Ok(ResultadoGrabacion::Pequeno(destino, bytes)) = resultado else {
-            panic!("se esperaba parcial pequeno");
-        };
-        assert_eq!(bytes, 7);
-        assert_eq!(
-            destino,
-            ruta.parent()
-                .expect("ruta con parent")
-                .join("small")
-                .join(ruta.file_name().expect("ruta con filename"))
-        );
-        assert!(destino.exists());
-        assert!(!parcial.exists());
-        let _ = tokio::fs::remove_file(destino).await;
+        assert!(matches!(resultado, Ok(ResultadoGrabacion::Cancelado)));
+        assert!(parcial.exists());
+        assert!(!ruta.exists());
+        let _ = tokio::fs::remove_file(parcial).await;
     }
 
     #[tokio::test]

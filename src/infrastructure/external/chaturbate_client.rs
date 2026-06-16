@@ -16,11 +16,14 @@ use std::process::{ExitStatus, Stdio};
 use tokio::io::AsyncReadExt;
 use tokio::process::Child;
 use tokio::sync::watch;
-use tokio::time::Duration;
+use tokio::time::{Duration, Instant};
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36";
 const HTTP_TIMEOUT_SECS: u64 = 10;
 const HTTP_RETRY_BASE_MS: u64 = 200;
+const FFMPEG_SHUTDOWN_GRACE_SECS: u64 = 15;
+const FFMPEG_STALL_TIMEOUT_SECS: u64 = 120;
+const FFMPEG_STALL_CHECK_SECS: u64 = 5;
 
 fn make_backoff() -> ExponentialBackoff {
     ExponentialBackoff {
@@ -274,6 +277,16 @@ impl StreamRepository for ChaturbateClient {
                     cancelar_ffmpeg(&mut child, stderr_task.take()).await;
                     return Err(InfrastructureError::RecordingCancelled);
                 }
+                _ = esperar_sin_progreso(
+                    output_path,
+                    Duration::from_secs(FFMPEG_STALL_TIMEOUT_SECS),
+                    Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
+                ) => {
+                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
+                    return Err(InfrastructureError::RecordingError(
+                        format!("FFmpeg no escribio datos nuevos durante {} segundos", FFMPEG_STALL_TIMEOUT_SECS)
+                    ));
+                }
             }
         } else {
             tokio::select! {
@@ -291,6 +304,16 @@ impl StreamRepository for ChaturbateClient {
                 _ = esperar_limite_grabacion(self.max_duration_secs) => {
                     cancelar_ffmpeg(&mut child, stderr_task.take()).await;
                     return Err(InfrastructureError::RecordingCancelled);
+                }
+                _ = esperar_sin_progreso(
+                    output_path,
+                    Duration::from_secs(FFMPEG_STALL_TIMEOUT_SECS),
+                    Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
+                ) => {
+                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
+                    return Err(InfrastructureError::RecordingError(
+                        format!("FFmpeg no escribio datos nuevos durante {} segundos", FFMPEG_STALL_TIMEOUT_SECS)
+                    ));
                 }
             }
         }
@@ -638,14 +661,43 @@ async fn leer_stderr_ffmpeg(stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>
 
 async fn cancelar_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) {
     solicitar_cierre_ffmpeg(child);
-    if tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .is_err()
+    if tokio::time::timeout(
+        Duration::from_secs(FFMPEG_SHUTDOWN_GRACE_SECS),
+        child.wait(),
+    )
+    .await
+    .is_err()
     {
         let _ = child.kill().await;
         let _ = child.wait().await;
     }
     let _ = leer_stderr_ffmpeg(stderr_task).await;
+}
+
+async fn esperar_sin_progreso(path: &Path, timeout: Duration, check_interval: Duration) {
+    let mut ultimo_tamano = tamano_archivo(path).await;
+    let mut ultimo_cambio = Instant::now();
+
+    loop {
+        tokio::time::sleep(check_interval).await;
+        let tamano = tamano_archivo(path).await;
+        if tamano > ultimo_tamano {
+            ultimo_tamano = tamano;
+            ultimo_cambio = Instant::now();
+            continue;
+        }
+
+        if ultimo_cambio.elapsed() >= timeout {
+            return;
+        }
+    }
+}
+
+async fn tamano_archivo(path: &Path) -> u64 {
+    tokio::fs::metadata(path)
+        .await
+        .map(|meta| meta.len())
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -1051,6 +1103,24 @@ hi.m3u8
             .to_string()
             .contains("Invalid playlist: missing #EXTM3U header"));
         let _ = request_task.await.expect("request task");
+    }
+
+    #[tokio::test]
+    async fn esperar_sin_progreso_detecta_archivo_estancado() {
+        let path = std::env::temp_dir().join(format!(
+            "cbrec_stall_{}.part.mp4",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        ));
+        tokio::fs::write(&path, b"datos")
+            .await
+            .expect("crea parcial");
+
+        esperar_sin_progreso(&path, Duration::from_millis(20), Duration::from_millis(5)).await;
+
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
