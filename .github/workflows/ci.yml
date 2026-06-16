@@ -112,7 +112,7 @@ jobs:
             dist_prefix: cbrec-windows-x86_64
 
           # macOS Intel
-          - runner: macos-13
+          - runner: macos-15-intel
             target: x86_64-apple-darwin
             dist_prefix: cbrec-macos-x86_64
 
