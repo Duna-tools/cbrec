@@ -97,6 +97,10 @@ jobs:
     needs: [test, audit]
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.runner }}
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -359,6 +363,12 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+      - name: Attest dist artifacts
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist/*
+
   # ─────────────────────────────────────────────────────────
   # 4. PKGBUILD — genera el PKGBUILD para Arch Linux / AUR
   #    Solo corre en tags v*
@@ -368,6 +378,10 @@ jobs:
     needs: [test, audit]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
 
     steps:
       - name: Checkout
@@ -403,6 +417,11 @@ jobs:
           path: dist/PKGBUILD
           if-no-files-found: error
 
+      - name: Attest PKGBUILD artifact
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist/PKGBUILD
+
   # ─────────────────────────────────────────────────────────
   # 5. RELEASE — crea la GitHub Release con todos los assets
   #    Solo corre en tags v*, después de package y pkgbuild
@@ -413,7 +432,9 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
+      attestations: write
       contents: write
+      id-token: write
 
     steps:
       - name: Download all dist artifacts
@@ -430,6 +451,11 @@ jobs:
           cd dist
           sha256sum * > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Attest SHA256SUMS
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: dist/SHA256SUMS
 
       - name: Create release notes
         shell: bash
@@ -480,6 +506,8 @@ jobs:
           \`\`\`bash
           sha256sum -c SHA256SUMS
           \`\`\`
+
+          Los assets de release y \`SHA256SUMS\` incluyen artifact attestations de GitHub Actions.
           EOF
 
       - name: Create GitHub Release

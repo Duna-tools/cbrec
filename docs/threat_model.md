@@ -50,6 +50,7 @@ Out of scope:
 | Corrupt watched list | Invalid `watched.toml` is backed up and reset |
 | Dependency drift | Dependabot for Cargo and GitHub Actions |
 | Release integrity | Release workflow publishes `SHA256SUMS` |
+| Release provenance | Tagged release assets are covered by GitHub artifact attestations |
 
 ## Residual Risks
 
@@ -57,12 +58,11 @@ Out of scope:
 - Chaturbate can change API response shape, access controls, anti-bot behavior, or playlist structure.
 - FFmpeg is a large native dependency; cbrec validates execution but does not sandbox FFmpeg.
 - CI runners are trusted for release builds.
-- Checksums prove integrity after release publication, not author identity.
+- Checksums prove integrity after release publication; artifact attestations add build provenance but still trust GitHub-hosted runners.
 
 ## Hardening Backlog
 
 - Prefer config/env cookie input in docs over CLI cookies.
-- Add artifact attestations for release assets.
 - Add more contract tests for playlist variants and blocked responses.
 - Add fuzz/property tests for URL/model normalization and playlist parsing.
 - Consider signed releases if distribution grows beyond personal use.
