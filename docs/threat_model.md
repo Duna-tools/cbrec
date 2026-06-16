@@ -48,6 +48,7 @@ Out of scope:
 | FFmpeg stderr leaking cookies | Cookie-looking stderr lines are redacted |
 | CLI cookie exposure | `CBREC_SESSION_COOKIE` and config input are documented; CLI cookie use emits a warning |
 | Chaturbate status changes | HTTP status classification and contract tests |
+| Playlist response drift | M3U8 header validation and playlist contract tests |
 | Corrupt watched list | Invalid `watched.toml` is backed up and reset |
 | Dependency drift | Dependabot for Cargo and GitHub Actions |
 | Release integrity | Release workflow publishes `SHA256SUMS` |
@@ -63,6 +64,6 @@ Out of scope:
 
 ## Hardening Backlog
 
-- Add more contract tests for playlist variants and blocked responses.
+- Add more contract tests for newly observed Chaturbate response shapes.
 - Add fuzz/property tests for URL/model normalization and playlist parsing.
 - Consider signed releases if distribution grows beyond personal use.
