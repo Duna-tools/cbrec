@@ -45,6 +45,12 @@ fn parse_check() {
 }
 
 #[test]
+fn parse_doctor_command() {
+    let cli = Cli::parse_from(["cbrec", "doctor"]);
+    assert!(matches!(cli.command, Some(Commands::Doctor)));
+}
+
+#[test]
 fn parse_ffmpeg_path_global() {
     let cli = Cli::parse_from(["cbrec", "record", "alice", "--ffmpeg-path", "/tmp/ffmpeg"]);
     assert_eq!(cli.ffmpeg_path.as_deref(), Some("/tmp/ffmpeg"));

@@ -40,6 +40,11 @@ pub trait Output: Send + Sync {
     fn mostrar_modelo_sin_variantes(&self, modelo: &str);
     fn mostrar_calidades(&self, modelo: &str, calidades: &[(Option<u32>, Option<u64>)]);
     fn mostrar_progreso_grabacion(&self, _modelo: &str, _bytes: u64) {}
+    fn doctor_inicio(&self) {}
+    fn doctor_ok(&self, _area: &str, _detalle: &str) {}
+    fn doctor_warn(&self, _area: &str, _detalle: &str) {}
+    fn doctor_error(&self, _area: &str, _detalle: &str) {}
+    fn doctor_resumen(&self, _fallos: usize, _advertencias: usize) {}
     fn watch_inicio(&self, modelos: &[&str]);
     fn watch_tick_online(&self, modelo: &str);
     fn watch_tick_offline(&self, modelo: &str);
@@ -306,6 +311,45 @@ impl Output for ConsoleOutput {
             modelo.cyan(),
             format!("{:.1} MB", mb).bright_blue()
         );
+    }
+
+    fn doctor_inicio(&self) {
+        if self.quiet {
+            return;
+        }
+        println!("=== cbrec doctor ===");
+    }
+
+    fn doctor_ok(&self, area: &str, detalle: &str) {
+        if self.quiet {
+            return;
+        }
+        println!("{} {}: {}", "[OK]".green().bold(), area.cyan(), detalle);
+    }
+
+    fn doctor_warn(&self, area: &str, detalle: &str) {
+        eprintln!("{} {}: {}", "[WARN]".yellow().bold(), area.cyan(), detalle);
+    }
+
+    fn doctor_error(&self, area: &str, detalle: &str) {
+        eprintln!("{} {}: {}", "[ERROR]".red().bold(), area.cyan(), detalle);
+    }
+
+    fn doctor_resumen(&self, fallos: usize, advertencias: usize) {
+        if fallos == 0 {
+            println!(
+                "{} doctor completo ({} advertencia(s))",
+                "[OK]".green().bold(),
+                advertencias
+            );
+        } else {
+            eprintln!(
+                "{} doctor encontro {} fallo(s) y {} advertencia(s)",
+                "[ERROR]".red().bold(),
+                fallos,
+                advertencias
+            );
+        }
     }
 
     fn watch_inicio(&self, modelos: &[&str]) {

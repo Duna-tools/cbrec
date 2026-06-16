@@ -706,6 +706,9 @@ fn redactar_linea_sensible(linea: &str) -> String {
 mod tests {
     use super::*;
     use crate::domain::value_objects::VideoQuality;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::task::JoinHandle;
 
     #[test]
     fn parsea_variantes_y_selecciona() {
@@ -894,5 +897,119 @@ hi.m3u8
         let resumen = resumen_stderr(stderr).unwrap();
 
         assert_eq!(resumen, "1 | 2 | 3 | 4 | 5 | 6 | 7 | 8");
+    }
+
+    #[tokio::test]
+    async fn consultar_estado_online_contrato_http() {
+        let Some((base_url, request_task)) = servidor_http_falso(
+            200,
+            r#"{"room_status":"public","hls_source":"https://example.com/live.m3u8"}"#,
+        )
+        .await
+        else {
+            return;
+        };
+        let mut client = ChaturbateClient::new().expect("crea cliente");
+        client.base_url = base_url;
+        let model = ModelName::try_from("alice").unwrap();
+
+        let estado = client.consultar_estado(&model).await.expect("consulta");
+
+        let EstadoStream::Online { stream_url } = estado else {
+            panic!("se esperaba online");
+        };
+        assert_eq!(stream_url.as_str(), "https://example.com/live.m3u8");
+        let request = request_task.await.expect("request task");
+        assert!(request.starts_with("GET /api/chatvideocontext/alice/ HTTP/1.1"));
+    }
+
+    #[tokio::test]
+    async fn consultar_estado_rate_limit_contrato_http() {
+        let Some((base_url, request_task)) = servidor_http_falso(429, "{}").await else {
+            return;
+        };
+        let mut client = ChaturbateClient::new().expect("crea cliente");
+        client.base_url = base_url;
+        let model = ModelName::try_from("alice").unwrap();
+
+        let estado = client.consultar_estado(&model).await.expect("consulta");
+
+        assert_eq!(estado, EstadoStream::RateLimited);
+        let _ = request_task.await.expect("request task");
+    }
+
+    #[tokio::test]
+    async fn consultar_estado_forbidden_requiere_sesion_contrato_http() {
+        let Some((base_url, request_task)) = servidor_http_falso(403, "{}").await else {
+            return;
+        };
+        let mut client = ChaturbateClient::new().expect("crea cliente");
+        client.base_url = base_url;
+        let model = ModelName::try_from("alice").unwrap();
+
+        let estado = client.consultar_estado(&model).await.expect("consulta");
+
+        assert!(matches!(estado, EstadoStream::RequiereSesion { .. }));
+        let _ = request_task.await.expect("request task");
+    }
+
+    #[tokio::test]
+    async fn consultar_estado_envia_cookie_si_existe() {
+        let Some((base_url, request_task)) =
+            servidor_http_falso(200, r#"{"room_status":"offline","hls_source":null}"#).await
+        else {
+            return;
+        };
+        let mut client = ChaturbateClient::new()
+            .expect("crea cliente")
+            .with_session_cookie("PHPSESSID=abc; chaturbatesid=xyz".to_string());
+        client.base_url = base_url;
+        let model = ModelName::try_from("alice").unwrap();
+
+        let estado = client.consultar_estado(&model).await.expect("consulta");
+
+        assert_eq!(estado, EstadoStream::Offline);
+        let request = request_task.await.expect("request task");
+        assert!(request.contains("cookie: PHPSESSID=abc; chaturbatesid=xyz"));
+    }
+
+    async fn servidor_http_falso(
+        status: u16,
+        body: &'static str,
+    ) -> Option<(String, JoinHandle<String>)> {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => return None,
+            Err(e) => panic!("bind test server: {e}"),
+        };
+        let addr = listener.local_addr().expect("addr test server");
+        let task = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut buffer = vec![0_u8; 4096];
+            let n = socket.read(&mut buffer).await.expect("read request");
+            let request = String::from_utf8_lossy(&buffer[..n]).to_string();
+            let response = format!(
+                "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                status,
+                razon_http(status),
+                body.len(),
+                body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+            request.to_ascii_lowercase()
+        });
+        Some((format!("http://{}", addr), task))
+    }
+
+    fn razon_http(status: u16) -> &'static str {
+        match status {
+            200 => "OK",
+            403 => "Forbidden",
+            429 => "Too Many Requests",
+            _ => "Status",
+        }
     }
 }

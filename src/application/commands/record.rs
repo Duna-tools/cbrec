@@ -1,7 +1,8 @@
 use crate::application::recording::{
-    descargar_grabacion, detener_tarea_progreso, ruta_parcial, ResultadoGrabacion,
+    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
+    ResultadoGrabacion,
 };
-use crate::application::utils::{deduplicar_modelos, ParametrosGrabacion};
+use crate::application::utils::{normalizar_modelos, ParametrosGrabacion};
 use crate::domain::value_objects::{ModelName, VideoQuality};
 use crate::infrastructure::{AppConfig, ChaturbateClient, EstadoStream};
 use crate::presentation::Output;
@@ -36,7 +37,7 @@ pub(crate) async fn grabar_modelos(
     let client = Arc::new(client);
     let config = Arc::new(config);
 
-    let (modelos, duplicados) = deduplicar_modelos(modelos);
+    let (modelos, duplicados) = normalizar_modelos(modelos)?;
     if duplicados > 0 {
         salida.advertir_modelos_duplicados(duplicados);
     }
@@ -52,7 +53,7 @@ pub(crate) async fn grabar_modelos(
     let mut tareas = JoinSet::new();
 
     for modelo in modelos {
-        if tx.send(modelo).await.is_err() {
+        if tx.send(modelo.as_str().to_string()).await.is_err() {
             break;
         }
     }
@@ -185,7 +186,8 @@ async fn grabar_modelo(
         salida.mostrar_modelo_online_detallado();
     }
 
-    let ruta = config.get_output_path(model_name.as_str(), raiz_salida_override);
+    let ruta_base = config.get_output_path(model_name.as_str(), raiz_salida_override);
+    let ruta = preparar_ruta_grabacion(ruta_base).await?;
 
     if modo_detallado {
         salida.mostrar_detalle_inicio_grabacion(&ruta);

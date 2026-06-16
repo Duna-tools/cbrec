@@ -9,6 +9,7 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 - [Español](#español)
 - [English](#english)
 - [Releases](https://github.com/Duna-tools/cbrec/releases)
+- [Threat Model](docs/threat_model.md)
 - [License](#license--licencia)
 
 ---
@@ -98,6 +99,8 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec nombremodelo
 
 La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
 
+Puedes pasar nombres de modelo o URLs de Chaturbate; cbrec normaliza ambos al mismo nombre interno antes de grabar, monitorizar o guardar en la lista.
+
 #### Daemon de monitorización: `watch`
 
 ```bash
@@ -151,6 +154,9 @@ cbrec record alice --duration 20
 # Listar calidades disponibles
 cbrec alice -l
 
+# Revisar FFmpeg, configuracion, salida y lista watch
+cbrec doctor
+
 # Ver ayuda
 cbrec --help
 cbrec watch --help
@@ -194,17 +200,20 @@ Archivo: `~/.config/cbrec/config.toml`
 output_root = ~/Videos
 
 # Tamaño mínimo de archivo en bytes.
-# Archivos menores se mueven a /small.
+# Archivos menores se mueven a /small. Debe ser mayor a 0.
 min_file_size = 262144000
 
 [naming]
 # Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+# Debe ser una ruta relativa y no puede contener ..
 template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
 
 [watch]
+# Todos los intervalos deben ser mayores a 0.
 poll_interval_secs = 60
 poll_interval_idle_secs = 300
 idle_threshold_mins = 30
+# Rango seguro: 1..16
 max_simultaneous = 3
 
 [auth]
@@ -365,6 +374,8 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec modelname
 
 The default quality is `best`: cbrec resolves the highest available variant and records that direct URL. When `--duration` is used, the output is treated as an explicit clip and is not marked as a "small file" by the normal long-recording threshold.
 
+You can pass model names or Chaturbate URLs; cbrec normalizes both to the same internal model name before recording, watching, or saving to the list.
+
 #### Monitoring daemon: `watch`
 
 ```bash
@@ -418,6 +429,9 @@ cbrec record alice --duration 20
 # List available qualities
 cbrec alice -l
 
+# Check FFmpeg, configuration, output, and watch list
+cbrec doctor
+
 # Show help
 cbrec --help
 cbrec watch --help
@@ -461,17 +475,20 @@ File: `~/.config/cbrec/config.toml`
 output_root = ~/Videos
 
 # Minimum file size in bytes.
-# Smaller files are moved to /small.
+# Smaller files are moved to /small. Must be greater than 0.
 min_file_size = 262144000
 
 [naming]
 # Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+# Must be a relative path and cannot contain ..
 template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
 
 [watch]
+# All intervals must be greater than 0.
 poll_interval_secs = 60
 poll_interval_idle_secs = 300
 idle_threshold_mins = 30
+# Safe range: 1..16
 max_simultaneous = 3
 
 [auth]

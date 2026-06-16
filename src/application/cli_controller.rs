@@ -1,10 +1,10 @@
-use crate::application::commands::{add, check, list, record, remove};
+use crate::application::commands::{add, check, doctor, list, record, remove};
 use crate::application::utils::{
-    aplicar_ffmpeg_path, extraer_nombre, resolver_ffmpeg_path, resolver_ruta_opcional,
+    aplicar_ffmpeg_path, normalizar_modelos, resolver_ffmpeg_path, resolver_ruta_opcional,
     validar_ffmpeg, ParametrosGrabacion, FFMPEG_ENV,
 };
 use crate::application::watch_service::{self, ConsoleWatchPrompter, WatchParams};
-use crate::domain::value_objects::{ModelName, VideoQuality};
+use crate::domain::value_objects::VideoQuality;
 use crate::infrastructure::{AppConfig, ChaturbateClient, ConfigWarning, WatchedModels};
 use crate::presentation::{Cli, Commands, ConsoleOutput, Output};
 use std::str::FromStr;
@@ -104,6 +104,16 @@ pub async fn ejecutar_cli(
         Some(Commands::Check { model }) => {
             check::verificar_modelo(&client, salida.as_ref(), &model).await
         }
+        Some(Commands::Doctor) => {
+            doctor::ejecutar_doctor(
+                &config,
+                &ruta_ffmpeg,
+                ffmpeg_explicito,
+                resolver_ruta_opcional(salida_principal.clone()),
+                salida.as_ref(),
+            )
+            .await
+        }
         Some(Commands::Watch {
             modelos,
             ask,
@@ -117,7 +127,7 @@ pub async fn ejecutar_cli(
                 config.watch.ask_timeout_secs = t;
             }
 
-            // Normalizar nombres (extrae username de URLs)
+            let modelos_desde_cli = !modelos.is_empty();
             let nombres: Vec<String> = if modelos.is_empty() {
                 let watched = WatchedModels::load_with_warnings();
                 mostrar_config_warnings(salida.as_ref(), &watched.warnings);
@@ -128,18 +138,16 @@ pub async fn ejecutar_cli(
                 }
                 watched.watched.models
             } else {
-                modelos.iter().map(|m| extraer_nombre(m)).collect()
+                modelos
             };
 
-            // Validar todos los nombres antes de guardar en watched.toml
-            let modelos_vobj = nombres
-                .iter()
-                .map(|m| ModelName::try_from(m.as_str()))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| anyhow::anyhow!(e))?;
+            let (modelos_vobj, duplicados) = normalizar_modelos(nombres)?;
+            if duplicados > 0 {
+                salida.advertir_modelos_duplicados(duplicados);
+            }
 
             // Guardar solo si vienen de CLI (no de watched.toml)
-            if !modelos.is_empty() {
+            if modelos_desde_cli {
                 let resultado = WatchedModels::update(|watched| {
                     let mut cambio = false;
                     for m in &modelos_vobj {
