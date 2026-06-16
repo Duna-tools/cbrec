@@ -44,6 +44,8 @@ Out of scope:
 | Bad config causing tight loops or disabled recording | Config normalization with warnings |
 | Broken local environment | `cbrec doctor` checks FFmpeg, output, watchlist, and auth state |
 | File overwrite or partial collision | Recording preflight reserves `.part` files and suffixes colliding outputs |
+| Stalled recordings | FFmpeg is cancelled when the output file stops growing |
+| Corrupt cancelled MP4s | Cancelled partial files stay as `.part` instead of being promoted as saved recordings |
 | FFmpeg path missing or broken | FFmpeg validation before recording |
 | FFmpeg stderr leaking cookies | Cookie-looking stderr lines are redacted |
 | CLI cookie exposure | `CBREC_SESSION_COOKIE` and config input are documented; CLI cookie use emits a warning |
