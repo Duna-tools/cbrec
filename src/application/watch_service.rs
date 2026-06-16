@@ -400,7 +400,7 @@ mod tests {
             output_path: &Path,
             _quality: VideoQuality,
         ) -> Result<(), Self::Error> {
-            tokio::fs::write(output_path, b"video").await?;
+            tokio::fs::write(output_path, mp4_minimo_valido()).await?;
             Ok(())
         }
     }
@@ -550,6 +550,16 @@ mod tests {
 
     fn modelo(nombre: &str) -> ModelName {
         ModelName::try_from(nombre).unwrap()
+    }
+
+    fn mp4_minimo_valido() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&16_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom0000");
+        bytes.extend_from_slice(&8_u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes
     }
 
     #[tokio::test]

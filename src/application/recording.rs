@@ -2,6 +2,7 @@ use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::{StreamUrl, VideoQuality};
 use crate::infrastructure::InfrastructureError;
 use std::ffi::OsStr;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use tokio::fs::OpenOptions;
 use tokio::task::JoinHandle;
@@ -66,13 +67,24 @@ where
         Err(InfrastructureError::RecordingCancelled) => {
             if !parcial_aprovechable(&parcial).await {
                 limpiar_parcial(&parcial).await;
+                return Ok(ResultadoGrabacion::Cancelado);
             }
-            return Ok(ResultadoGrabacion::Cancelado);
+
+            if !archivo_finalizable(&parcial).await {
+                return Ok(ResultadoGrabacion::Cancelado);
+            }
         }
         Err(e) => {
             limpiar_parcial(&parcial).await;
             return Err(e);
         }
+    }
+
+    if !archivo_finalizable(&parcial).await {
+        limpiar_parcial(&parcial).await;
+        return Err(InfrastructureError::RecordingError(
+            "archivo parcial no parece un MP4 finalizado".to_string(),
+        ));
     }
 
     let meta = match tokio::fs::metadata(&parcial).await {
@@ -182,6 +194,77 @@ async fn parcial_aprovechable(parcial: &Path) -> bool {
         .unwrap_or(false)
 }
 
+async fn archivo_finalizable(path: &Path) -> bool {
+    if !requiere_validacion_mp4(path) {
+        return true;
+    }
+
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || mp4_tiene_moov(&path))
+        .await
+        .unwrap_or(false)
+}
+
+fn requiere_validacion_mp4(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| matches!(e.to_ascii_lowercase().as_str(), "mp4" | "m4v" | "mov"))
+        .unwrap_or(false)
+}
+
+fn mp4_tiene_moov(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(_) => return false,
+    };
+    let total = match file.metadata() {
+        Ok(meta) => meta.len(),
+        Err(_) => return false,
+    };
+    let mut offset = 0_u64;
+
+    while offset.saturating_add(8) <= total {
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return false;
+        }
+
+        let mut header = [0_u8; 8];
+        if file.read_exact(&mut header).is_err() {
+            return false;
+        }
+
+        let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]) as u64;
+        let atom = &header[4..8];
+        let mut header_size = 8_u64;
+        let size = if size32 == 1 {
+            let mut extended = [0_u8; 8];
+            if file.read_exact(&mut extended).is_err() {
+                return false;
+            }
+            header_size = 16;
+            u64::from_be_bytes(extended)
+        } else if size32 == 0 {
+            total.saturating_sub(offset)
+        } else {
+            size32
+        };
+
+        if atom == b"moov" {
+            return true;
+        }
+        if size < header_size {
+            return false;
+        }
+
+        offset = match offset.checked_add(size) {
+            Some(next) if next > offset => next,
+            _ => return false,
+        };
+    }
+
+    false
+}
+
 pub(crate) async fn detener_tarea_progreso(task: JoinHandle<()>) {
     task.abort();
     let _ = task.await;
@@ -196,6 +279,7 @@ mod tests {
 
     struct RepoCancelado;
     struct RepoCanceladoConParcial;
+    struct RepoCanceladoConMp4Valido;
     struct RepoOkConParcial;
     struct RepoErrorConParcial;
 
@@ -243,6 +327,28 @@ mod tests {
     }
 
     #[async_trait]
+    impl StreamRepository for RepoCanceladoConMp4Valido {
+        type Error = InfrastructureError;
+
+        async fn get_stream_url(
+            &self,
+            _model_name: &ModelName,
+        ) -> Result<Option<StreamUrl>, Self::Error> {
+            Ok(None)
+        }
+
+        async fn download_stream(
+            &self,
+            _stream_url: &StreamUrl,
+            output_path: &Path,
+            _quality: VideoQuality,
+        ) -> Result<(), Self::Error> {
+            tokio::fs::write(output_path, mp4_minimo_valido()).await?;
+            Err(InfrastructureError::RecordingCancelled)
+        }
+    }
+
+    #[async_trait]
     impl StreamRepository for RepoErrorConParcial {
         type Error = InfrastructureError;
 
@@ -281,7 +387,7 @@ mod tests {
             output_path: &Path,
             _quality: VideoQuality,
         ) -> Result<(), Self::Error> {
-            tokio::fs::write(output_path, b"parcial").await?;
+            tokio::fs::write(output_path, mp4_minimo_valido()).await?;
             Ok(())
         }
     }
@@ -292,6 +398,16 @@ mod tests {
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         std::env::temp_dir().join(format!("cbrec_test_{}_{}.mp4", nombre, nanos))
+    }
+
+    fn mp4_minimo_valido() -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&16_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom0000");
+        bytes.extend_from_slice(&8_u32.to_be_bytes());
+        bytes.extend_from_slice(b"moov");
+        bytes
     }
 
     #[test]
@@ -386,6 +502,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn descargar_grabacion_guarda_mp4_finalizado_si_se_cancela() {
+        let repo = RepoCanceladoConMp4Valido;
+        let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
+        let ruta = ruta_temporal("cancelado_mp4_valido");
+
+        let resultado =
+            descargar_grabacion(&repo, &stream_url, ruta.clone(), VideoQuality::Best, None).await;
+
+        let Ok(ResultadoGrabacion::Guardado(destino)) = resultado else {
+            panic!("se esperaba archivo guardado");
+        };
+        assert_eq!(destino, ruta);
+        assert!(destino.exists());
+        let _ = tokio::fs::remove_file(destino).await;
+    }
+
+    #[tokio::test]
     async fn descargar_grabacion_limpia_parcial_si_falla_descarga() {
         let repo = RepoErrorConParcial;
         let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
@@ -414,5 +547,36 @@ mod tests {
         assert_eq!(destino, ruta);
         assert!(destino.exists());
         let _ = tokio::fs::remove_file(destino).await;
+    }
+
+    #[tokio::test]
+    async fn mp4_tiene_moov_detecta_mp4_finalizado() {
+        let ruta = ruta_temporal("moov");
+        tokio::fs::write(&ruta, mp4_minimo_valido())
+            .await
+            .expect("crea mp4 minimo");
+
+        assert!(archivo_finalizable(&ruta).await);
+
+        let _ = tokio::fs::remove_file(ruta).await;
+    }
+
+    #[tokio::test]
+    async fn mp4_tiene_moov_rechaza_parcial_sin_moov() {
+        let ruta = ruta_temporal("sin_moov");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&16_u32.to_be_bytes());
+        bytes.extend_from_slice(b"ftyp");
+        bytes.extend_from_slice(b"isom0000");
+        bytes.extend_from_slice(&16_u32.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.extend_from_slice(b"datosxxx");
+        tokio::fs::write(&ruta, bytes)
+            .await
+            .expect("crea mp4 parcial");
+
+        assert!(!archivo_finalizable(&ruta).await);
+
+        let _ = tokio::fs::remove_file(ruta).await;
     }
 }

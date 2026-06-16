@@ -283,9 +283,10 @@ impl StreamRepository for ChaturbateClient {
                     Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
                 ) => {
                     cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingError(
-                        format!("FFmpeg no escribio datos nuevos durante {} segundos", FFMPEG_STALL_TIMEOUT_SECS)
-                    ));
+                    return Err(InfrastructureError::RecordingError(format!(
+                        "FFmpeg no escribio datos nuevos durante {} segundos",
+                        FFMPEG_STALL_TIMEOUT_SECS
+                    )));
                 }
             }
         } else {
@@ -311,9 +312,10 @@ impl StreamRepository for ChaturbateClient {
                     Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
                 ) => {
                     cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingError(
-                        format!("FFmpeg no escribio datos nuevos durante {} segundos", FFMPEG_STALL_TIMEOUT_SECS)
-                    ));
+                    return Err(InfrastructureError::RecordingError(format!(
+                        "FFmpeg no escribio datos nuevos durante {} segundos",
+                        FFMPEG_STALL_TIMEOUT_SECS
+                    )));
                 }
             }
         }
