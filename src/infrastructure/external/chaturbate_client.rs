@@ -970,7 +970,9 @@ hi.m3u8
 
         assert_eq!(estado, EstadoStream::Offline);
         let request = request_task.await.expect("request task");
-        assert!(request.contains("cookie: PHPSESSID=abc; chaturbatesid=xyz"));
+        assert!(request
+            .to_ascii_lowercase()
+            .contains("cookie: phpsessid=abc; chaturbatesid=xyz"));
     }
 
     async fn servidor_http_falso(
@@ -999,7 +1001,7 @@ hi.m3u8
                 .write_all(response.as_bytes())
                 .await
                 .expect("write response");
-            request.to_ascii_lowercase()
+            request
         });
         Some((format!("http://{}", addr), task))
     }
