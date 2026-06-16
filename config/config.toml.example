@@ -6,12 +6,14 @@
 output_root = ~/Videos
 
 ; Tamaño mínimo de archivo (bytes). Archivos menores se marcan como parciales.
+; Debe ser mayor a 0.
 ; 250 MiB por defecto: 262144000
 min_file_size = 262144000
 
 [naming]
 ; Plantilla para nombres de archivo.
 ; Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+; Debe ser relativa y no puede contener ..
 template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
 
 ; Alternativas:
@@ -20,21 +22,27 @@ template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
 
 [watch]
 ; Intervalo de polling cuando hay actividad reciente (segundos).
+; Debe ser mayor a 0.
 poll_interval_secs = 60
 
 ; Intervalo de polling cuando todos los modelos llevan mucho tiempo offline (segundos).
+; Debe ser mayor o igual que poll_interval_secs.
 poll_interval_idle_secs = 300
 
 ; Minutos sin actividad para entrar en modo idle.
+; Debe ser mayor a 0.
 idle_threshold_mins = 30
 
 ; Máximo de grabaciones simultáneas en modo watch.
+; Rango seguro: 1..16.
 max_simultaneous = 3
 
 ; Segundos de espera tras un fallo antes de reintentar grabar ese modelo.
+; Debe ser mayor a 0.
 cooldown_tras_fallo_secs = 300
 
 ; Segundos de espera antes de auto-grabar cuando --ask esta activo.
+; Debe ser mayor a 0.
 ask_timeout_secs = 5
 
 ; Enviar notificacion de escritorio (notify-send) cuando un modelo se conecta.
@@ -52,4 +60,3 @@ notif_cuerpo = "{modelo}"
 ; Cómo obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
 ; Copia el valor de la cookie completa. Ejemplo:
 ; session_cookie = "PHPSESSID=abc123xyz; chaturbatesid=def456"
-

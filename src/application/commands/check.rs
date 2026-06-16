@@ -1,5 +1,4 @@
-use crate::application::utils::extraer_nombre;
-use crate::domain::value_objects::ModelName;
+use crate::application::utils::normalizar_modelo;
 use crate::infrastructure::{ChaturbateClient, EstadoStream};
 use crate::presentation::Output;
 
@@ -8,8 +7,7 @@ pub(crate) async fn verificar_modelo(
     salida: &dyn Output,
     model: &str,
 ) -> anyhow::Result<()> {
-    let nombre = extraer_nombre(model);
-    let model_name = ModelName::try_from(nombre.as_str())?;
+    let model_name = normalizar_modelo(model)?;
     salida.mostrar_inicio_verificacion(model_name.as_str());
 
     match client.consultar_estado(&model_name).await? {

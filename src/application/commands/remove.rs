@@ -1,18 +1,22 @@
-use crate::application::utils::extraer_nombre;
+use crate::application::utils::normalizar_modelo;
 use crate::infrastructure::WatchedModels;
 use crate::presentation::Output;
 
 pub(crate) fn eliminar_modelos(modelos: Vec<String>, salida: &dyn Output) -> anyhow::Result<()> {
+    let modelos = modelos
+        .iter()
+        .map(|m| normalizar_modelo(m))
+        .collect::<Result<Vec<_>, _>>()?;
+
     let resultado = WatchedModels::update_with_warnings(|watched| {
         let mut hubo_cambio = false;
 
-        for input in &modelos {
-            let nombre = extraer_nombre(input);
-            if watched.remove(&nombre) {
-                salida.modelo_eliminado(&nombre);
+        for nombre in &modelos {
+            if watched.remove(nombre.as_str()) {
+                salida.modelo_eliminado(nombre.as_str());
                 hubo_cambio = true;
             } else {
-                salida.modelo_no_encontrado_en_lista(&nombre);
+                salida.modelo_no_encontrado_en_lista(nombre.as_str());
             }
         }
 

@@ -3,6 +3,7 @@ use crate::domain::value_objects::{StreamUrl, VideoQuality};
 use crate::infrastructure::InfrastructureError;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use tokio::fs::OpenOptions;
 use tokio::task::JoinHandle;
 
 pub(crate) enum ResultadoGrabacion {
@@ -21,6 +22,27 @@ pub(crate) fn ruta_parcial(ruta: &Path) -> PathBuf {
         _ => "output.part".to_string(),
     };
     ruta.with_file_name(nombre)
+}
+
+pub(crate) async fn preparar_ruta_grabacion(
+    ruta_base: PathBuf,
+) -> Result<PathBuf, InfrastructureError> {
+    let parent = ruta_base.parent().ok_or_else(|| {
+        InfrastructureError::RecordingError("ruta de salida sin directorio padre".to_string())
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    probar_directorio_escribible(parent).await?;
+
+    for intento in 0..1000 {
+        let ruta = ruta_con_sufijo(&ruta_base, intento);
+        if ruta_disponible(&ruta).await? && reservar_parcial(&ruta).await? {
+            return Ok(ruta);
+        }
+    }
+
+    Err(InfrastructureError::RecordingError(
+        "no se pudo encontrar un nombre de archivo disponible".to_string(),
+    ))
 }
 
 pub(crate) async fn descargar_grabacion<R>(
@@ -77,6 +99,76 @@ where
         tokio::fs::rename(&parcial, &ruta).await?;
         Ok(ResultadoGrabacion::Guardado(ruta))
     }
+}
+
+async fn probar_directorio_escribible(dir: &Path) -> Result<(), InfrastructureError> {
+    let probe = dir.join(format!(".cbrec_write_test_{}", std::process::id()));
+    let file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&probe)
+        .await;
+
+    match file {
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(&probe).await;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn ruta_disponible(ruta: &Path) -> Result<bool, InfrastructureError> {
+    if existe(ruta).await? || existe(&ruta_parcial(ruta)).await? {
+        return Ok(false);
+    }
+
+    let small = ruta
+        .parent()
+        .map(|p| p.join("small"))
+        .unwrap_or_else(|| PathBuf::from("small"));
+    let destino_small = small.join(ruta.file_name().unwrap_or_else(|| OsStr::new("cbrec.mp4")));
+
+    Ok(!existe(&destino_small).await?)
+}
+
+async fn reservar_parcial(ruta: &Path) -> Result<bool, InfrastructureError> {
+    let parcial = ruta_parcial(ruta);
+    match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&parcial)
+        .await
+    {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+async fn existe(path: &Path) -> Result<bool, InfrastructureError> {
+    match tokio::fs::metadata(path).await {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn ruta_con_sufijo(ruta: &Path, intento: usize) -> PathBuf {
+    if intento == 0 {
+        return ruta.to_path_buf();
+    }
+
+    let stem = ruta
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("output");
+    let nombre = match ruta.extension().and_then(|n| n.to_str()) {
+        Some(extension) => format!("{stem}_{intento:03}.{extension}"),
+        None => format!("{stem}_{intento:03}"),
+    };
+    ruta.with_file_name(nombre)
 }
 
 async fn limpiar_parcial(parcial: &Path) {
@@ -207,6 +299,56 @@ mod tests {
         let ruta = PathBuf::from("/tmp/alice.mp4");
 
         assert_eq!(ruta_parcial(&ruta), PathBuf::from("/tmp/alice.part.mp4"));
+    }
+
+    #[tokio::test]
+    async fn preparar_ruta_grabacion_crea_dir_y_reserva_parcial() {
+        let dir = ruta_temporal("preflight_dir");
+        let ruta = dir.join("alice.mp4");
+
+        let preparada = preparar_ruta_grabacion(ruta.clone())
+            .await
+            .expect("prepara ruta");
+
+        assert_eq!(preparada, ruta);
+        assert!(ruta_parcial(&preparada).exists());
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn preparar_ruta_grabacion_no_pisa_archivo_existente() {
+        let dir = ruta_temporal("preflight_final");
+        tokio::fs::create_dir_all(&dir).await.expect("crea dir");
+        let ruta = dir.join("alice.mp4");
+        tokio::fs::write(&ruta, b"existente")
+            .await
+            .expect("crea archivo existente");
+
+        let preparada = preparar_ruta_grabacion(ruta)
+            .await
+            .expect("prepara ruta alternativa");
+
+        assert_eq!(preparada, dir.join("alice_001.mp4"));
+        assert!(ruta_parcial(&preparada).exists());
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn preparar_ruta_grabacion_no_pisa_parcial_existente() {
+        let dir = ruta_temporal("preflight_partial");
+        tokio::fs::create_dir_all(&dir).await.expect("crea dir");
+        let ruta = dir.join("alice.mp4");
+        tokio::fs::write(ruta_parcial(&ruta), b"parcial")
+            .await
+            .expect("crea parcial existente");
+
+        let preparada = preparar_ruta_grabacion(ruta)
+            .await
+            .expect("prepara ruta alternativa");
+
+        assert_eq!(preparada, dir.join("alice_001.mp4"));
+        assert!(ruta_parcial(&preparada).exists());
+        let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
     #[tokio::test]

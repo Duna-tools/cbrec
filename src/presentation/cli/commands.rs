@@ -75,6 +75,9 @@ pub enum Commands {
         model: String,
     },
 
+    /// Revisa configuracion, ffmpeg y rutas antes de grabar.
+    Doctor,
+
     /// Monitoriza modelos y graba automaticamente cuando se conectan.
     Watch {
         /// Modelos a monitorizar (opcional si ya hay lista guardada).

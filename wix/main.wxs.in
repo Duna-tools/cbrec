@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
-  wix/main.wxs — Instalador MSI para cbrec (Windows x86_64)
+  wix/main.wxs.in — Plantilla del instalador MSI para cbrec (Windows x86_64)
 
   UpgradeCode: FIJO para toda la vida del producto.
   Nunca lo cambies o Windows no podrá detectar upgrades.
@@ -12,7 +12,7 @@
     Id="*"
     Name="cbrec"
     Language="1033"
-    Version="0.0.2"
+    Version="@@VERSION@@"
     Manufacturer="Duna Tools"
     UpgradeCode="D4A7E291-3F8C-4B6D-9E2A-F015C83B7461">
 
@@ -60,6 +60,16 @@
         <File
           Id="fil_ffmpeg_exe"
           Source="$(var.CargoTargetBinDir)\ffmpeg.exe"
+          KeyPath="yes" />
+      </Component>
+
+      <Component
+        Id="cmp_third_party_notices"
+        Guid="0941E397-834E-40F1-9192-F19658F4B1F8"
+        Win64="yes">
+        <File
+          Id="fil_third_party_notices"
+          Source="$(var.CargoTargetBinDir)\THIRD_PARTY_NOTICES.md"
           KeyPath="yes" />
       </Component>
     </ComponentGroup>

@@ -1,6 +1,5 @@
-use crate::application::utils::extraer_nombre;
+use crate::application::utils::normalizar_modelo;
 use crate::domain::repositories::StreamRepository;
-use crate::domain::value_objects::ModelName;
 use crate::infrastructure::ChaturbateClient;
 use crate::presentation::Output;
 
@@ -10,8 +9,7 @@ pub(crate) async fn listar_calidades_modelos(
     modelos: Vec<String>,
 ) -> anyhow::Result<()> {
     for modelo in modelos {
-        let nombre = extraer_nombre(&modelo);
-        let model_name = ModelName::try_from(nombre.as_str())?;
+        let model_name = normalizar_modelo(&modelo)?;
         let stream_url = client.get_stream_url(&model_name).await?;
         let Some(stream_url) = stream_url else {
             salida.mostrar_estado_modelo(model_name.as_str(), false);

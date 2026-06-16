@@ -3,6 +3,9 @@
 **/*.rs.bk
 *.pdb
 
+# Generated packaging files
+wix/main.wxs
+
 # IDE
 .vscode/
 .idea/

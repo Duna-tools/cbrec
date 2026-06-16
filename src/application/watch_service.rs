@@ -1,5 +1,6 @@
 use crate::application::recording::{
-    descargar_grabacion, detener_tarea_progreso, ruta_parcial, ResultadoGrabacion,
+    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
+    ResultadoGrabacion,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::repositories::StreamRepository;
@@ -176,8 +177,15 @@ where
                     return (nombre_clone, None, false);
                 }
 
-                let ruta =
+                let ruta_base =
                     config_clone.get_output_path(nombre_clone.as_str(), raiz_clone.as_deref());
+                let ruta = match preparar_ruta_grabacion(ruta_base).await {
+                    Ok(ruta) => ruta,
+                    Err(e) => {
+                        salida_clone.error_fallo_grabacion(&nombre_clone, &e.to_string());
+                        return (nombre_clone, None, true);
+                    }
+                };
 
                 let salida_p = Arc::clone(&salida_clone);
                 let nombre_p = nombre_clone.clone();

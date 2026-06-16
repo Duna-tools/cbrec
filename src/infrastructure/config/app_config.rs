@@ -68,6 +68,12 @@ pub enum ConfigWarning {
         error: String,
         backup_error: String,
     },
+    ValorAjustado {
+        campo: &'static str,
+        valor: String,
+        reemplazo: String,
+        motivo: &'static str,
+    },
 }
 
 impl std::fmt::Display for ConfigWarning {
@@ -101,6 +107,16 @@ impl std::fmt::Display for ConfigWarning {
                 error,
                 backup_error
             ),
+            Self::ValorAjustado {
+                campo,
+                valor,
+                reemplazo,
+                motivo,
+            } => write!(
+                f,
+                "{}={} invalido: {}. Usando {}",
+                campo, valor, motivo, reemplazo
+            ),
         }
     }
 }
@@ -109,6 +125,7 @@ const OUTPUT_FOLDER: &str = "cb_rec";
 const LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 const LOCK_VENCIDO_TRAS: Duration = Duration::from_secs(300);
 const LOCK_REINTENTO: Duration = Duration::from_millis(50);
+const MAX_SIMULTANEOUS_SEGURO: usize = 16;
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -162,12 +179,113 @@ impl AppConfig {
                             path: ruta_config,
                             error: e.to_string(),
                         });
+                    } else {
+                        warnings.extend(config.normalizar_valores());
                     }
                 }
             }
         }
 
         LoadedAppConfig { config, warnings }
+    }
+
+    fn normalizar_valores(&mut self) -> Vec<ConfigWarning> {
+        let defaults = Self::default();
+        let mut warnings = Vec::new();
+
+        normalizar_u64(
+            "general.min_file_size",
+            &mut self.min_file_size,
+            defaults.min_file_size,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+
+        if template_inseguro(&self.naming_template) {
+            warnings.push(ConfigWarning::ValorAjustado {
+                campo: "naming.template",
+                valor: self.naming_template.clone(),
+                reemplazo: defaults.naming_template.clone(),
+                motivo: "debe ser relativo y no puede contener '..'",
+            });
+            self.naming_template = defaults.naming_template.clone();
+        }
+
+        normalizar_u64(
+            "watch.poll_interval_secs",
+            &mut self.watch.poll_interval_secs,
+            defaults.watch.poll_interval_secs,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+        normalizar_u64(
+            "watch.poll_interval_idle_secs",
+            &mut self.watch.poll_interval_idle_secs,
+            defaults.watch.poll_interval_idle_secs,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+        normalizar_u64(
+            "watch.idle_threshold_mins",
+            &mut self.watch.idle_threshold_mins,
+            defaults.watch.idle_threshold_mins,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+        normalizar_usize(
+            "watch.max_simultaneous",
+            &mut self.watch.max_simultaneous,
+            defaults.watch.max_simultaneous,
+            |v| (1..=MAX_SIMULTANEOUS_SEGURO).contains(&v),
+            "debe estar entre 1 y 16",
+            &mut warnings,
+        );
+        normalizar_u64(
+            "watch.cooldown_tras_fallo_secs",
+            &mut self.watch.cooldown_tras_fallo_secs,
+            defaults.watch.cooldown_tras_fallo_secs,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+        normalizar_u64(
+            "watch.ask_timeout_secs",
+            &mut self.watch.ask_timeout_secs,
+            defaults.watch.ask_timeout_secs,
+            |v| v > 0,
+            "debe ser mayor a 0",
+            &mut warnings,
+        );
+
+        if self.watch.poll_interval_idle_secs < self.watch.poll_interval_secs {
+            warnings.push(ConfigWarning::ValorAjustado {
+                campo: "watch.poll_interval_idle_secs",
+                valor: self.watch.poll_interval_idle_secs.to_string(),
+                reemplazo: self.watch.poll_interval_secs.to_string(),
+                motivo: "no debe ser menor que watch.poll_interval_secs",
+            });
+            self.watch.poll_interval_idle_secs = self.watch.poll_interval_secs;
+        }
+
+        if let Some(cookie) = self.auth.session_cookie.take() {
+            let cookie = cookie.trim().to_string();
+            if cookie.is_empty() {
+                warnings.push(ConfigWarning::ValorAjustado {
+                    campo: "auth.session_cookie",
+                    valor: "<vacia>".to_string(),
+                    reemplazo: "<sin cookie>".to_string(),
+                    motivo: "no puede estar vacia",
+                });
+            } else {
+                self.auth.session_cookie = Some(cookie);
+            }
+        }
+
+        warnings
     }
 
     fn aplicar_toml(&mut self, contenido: &str) -> Result<(), toml::de::Error> {
@@ -568,6 +686,54 @@ fn obtener_home_dir() -> Option<PathBuf> {
     UserDirs::new().map(|dirs| dirs.home_dir().to_path_buf())
 }
 
+fn normalizar_u64(
+    campo: &'static str,
+    valor: &mut u64,
+    reemplazo: u64,
+    valido: impl FnOnce(u64) -> bool,
+    motivo: &'static str,
+    warnings: &mut Vec<ConfigWarning>,
+) {
+    if valido(*valor) {
+        return;
+    }
+    warnings.push(ConfigWarning::ValorAjustado {
+        campo,
+        valor: valor.to_string(),
+        reemplazo: reemplazo.to_string(),
+        motivo,
+    });
+    *valor = reemplazo;
+}
+
+fn normalizar_usize(
+    campo: &'static str,
+    valor: &mut usize,
+    reemplazo: usize,
+    valido: impl FnOnce(usize) -> bool,
+    motivo: &'static str,
+    warnings: &mut Vec<ConfigWarning>,
+) {
+    if valido(*valor) {
+        return;
+    }
+    warnings.push(ConfigWarning::ValorAjustado {
+        campo,
+        valor: valor.to_string(),
+        reemplazo: reemplazo.to_string(),
+        motivo,
+    });
+    *valor = reemplazo;
+}
+
+fn template_inseguro(template: &str) -> bool {
+    let template = template.trim();
+    template.is_empty()
+        || template.contains("..")
+        || Path::new(template).is_absolute()
+        || template.starts_with('\\')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -682,6 +848,90 @@ notif_cuerpo = "cuerpo {modelo}"
             loaded.warnings.as_slice(),
             [ConfigWarning::ConfigInvalida { .. }]
         ));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn app_config_load_from_path_ajusta_valores_peligrosos() {
+        let path = ruta_temporal("config.toml");
+        fs::write(
+            &path,
+            r#"
+[general]
+min_file_size = 0
+
+[naming]
+template = "../{model}.mp4"
+
+[watch]
+poll_interval_secs = 0
+poll_interval_idle_secs = 1
+idle_threshold_mins = 0
+max_simultaneous = 99
+cooldown_tras_fallo_secs = 0
+ask_timeout_secs = 0
+
+[auth]
+session_cookie = "   "
+"#,
+        )
+        .expect("crea config peligrosa");
+
+        let loaded = AppConfig::load_from_path(Some(path.clone()));
+        let defaults = AppConfig::default();
+
+        assert_eq!(loaded.config.min_file_size, defaults.min_file_size);
+        assert_eq!(loaded.config.naming_template, defaults.naming_template);
+        assert_eq!(
+            loaded.config.watch.poll_interval_secs,
+            defaults.watch.poll_interval_secs
+        );
+        assert_eq!(
+            loaded.config.watch.poll_interval_idle_secs,
+            loaded.config.watch.poll_interval_secs
+        );
+        assert_eq!(
+            loaded.config.watch.idle_threshold_mins,
+            defaults.watch.idle_threshold_mins
+        );
+        assert_eq!(
+            loaded.config.watch.max_simultaneous,
+            defaults.watch.max_simultaneous
+        );
+        assert_eq!(
+            loaded.config.watch.cooldown_tras_fallo_secs,
+            defaults.watch.cooldown_tras_fallo_secs
+        );
+        assert_eq!(
+            loaded.config.watch.ask_timeout_secs,
+            defaults.watch.ask_timeout_secs
+        );
+        assert!(loaded.config.auth.session_cookie.is_none());
+        assert!(loaded
+            .warnings
+            .iter()
+            .any(|w| matches!(w, ConfigWarning::ValorAjustado { .. })));
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn app_config_normaliza_cookie_con_espacios() {
+        let path = ruta_temporal("config.toml");
+        fs::write(
+            &path,
+            r#"
+[auth]
+session_cookie = "  PHPSESSID=abc  "
+"#,
+        )
+        .expect("crea config con cookie");
+
+        let loaded = AppConfig::load_from_path(Some(path.clone()));
+
+        assert_eq!(
+            loaded.config.auth.session_cookie.as_deref(),
+            Some("PHPSESSID=abc")
+        );
         let _ = fs::remove_file(path);
     }
 
