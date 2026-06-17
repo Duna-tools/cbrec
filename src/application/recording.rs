@@ -33,6 +33,7 @@ pub(crate) async fn preparar_ruta_grabacion(
     })?;
     tokio::fs::create_dir_all(parent).await?;
     probar_directorio_escribible(parent).await?;
+    verificar_espacio_disponible(parent).await?;
 
     for intento in 0..1000 {
         let ruta = ruta_con_sufijo(&ruta_base, intento);
@@ -268,6 +269,33 @@ fn mp4_tiene_moov(path: &Path) -> bool {
 pub(crate) async fn detener_tarea_progreso(task: JoinHandle<()>) {
     task.abort();
     let _ = task.await;
+}
+
+#[cfg(unix)]
+async fn verificar_espacio_disponible(dir: &Path) -> Result<(), InfrastructureError> {
+    use std::ffi::CString;
+    let c_path = match CString::new(dir.to_string_lossy().as_bytes()) {
+        Ok(p) => p,
+        Err(_) => return Ok(()),
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return Ok(());
+    }
+    let libre = stat.f_bavail as u64 * stat.f_frsize as u64;
+    const MIN_LIBRE: u64 = 100 * 1024 * 1024;
+    if libre < MIN_LIBRE {
+        return Err(InfrastructureError::RecordingError(format!(
+            "espacio insuficiente en disco: {} MB libres",
+            libre / 1_048_576
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn verificar_espacio_disponible(_dir: &Path) -> Result<(), InfrastructureError> {
+    Ok(())
 }
 
 #[cfg(test)]
