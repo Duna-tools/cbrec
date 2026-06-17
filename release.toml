@@ -1,0 +1,6 @@
+sign-commit = false
+sign-tag = false
+push = true
+publish = false
+tag-message = "v{{version}}"
+pre-release-hook = ["sh", "-c", "cargo fmt --check && cargo clippy -- -D warnings && cargo test"]
