@@ -62,9 +62,21 @@ pub async fn ejecutar_cli(
     let ruta_ffmpeg = resolver_ffmpeg_path(ruta_ffmpeg_cli);
     let (cancel_tx, cancel_rx) = watch::channel(false);
     tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            let _ = cancel_tx.send(true);
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigint = signal(SignalKind::interrupt()).expect("SIGINT");
+            let mut sigterm = signal(SignalKind::terminate()).expect("SIGTERM");
+            tokio::select! {
+                _ = sigint.recv() => {}
+                _ = sigterm.recv() => {}
+            }
         }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+        let _ = cancel_tx.send(true);
     });
     let cancel_rx_worker = cancel_rx.clone();
 
@@ -96,7 +108,7 @@ pub async fn ejecutar_cli(
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
             let parametros = ParametrosGrabacion {
-                raiz_salida: resolver_ruta_opcional(output),
+                raiz_salida: resolver_salida_subcomando(output, &salida_principal),
                 quality: v_quality,
                 limite_concurrencia,
                 min_file_size,
@@ -165,7 +177,7 @@ pub async fn ejecutar_cli(
             }
 
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
-            let raiz_salida = resolver_ruta_opcional(output);
+            let raiz_salida = resolver_salida_subcomando(output, &salida_principal);
 
             validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito).await?;
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
@@ -222,6 +234,13 @@ fn mostrar_config_warnings(salida: &dyn Output, warnings: &[ConfigWarning]) {
     for warning in warnings {
         salida.advertir_config(&warning.to_string());
     }
+}
+
+fn resolver_salida_subcomando(
+    local: Option<String>,
+    principal: &Option<String>,
+) -> Option<std::path::PathBuf> {
+    resolver_ruta_opcional(local.or_else(|| principal.clone()))
 }
 
 fn resolver_session_cookie(
@@ -332,5 +351,22 @@ mod tests {
 
         assert_eq!(cookie.0.as_deref(), Some("PHPSESSID=config"));
         assert!(!cookie.1);
+    }
+
+    #[test]
+    fn resolver_salida_subcomando_prefiere_local() {
+        let salida = resolver_salida_subcomando(
+            Some("/tmp/local".to_string()),
+            &Some("/tmp/global".to_string()),
+        );
+
+        assert_eq!(salida.as_deref(), Some(std::path::Path::new("/tmp/local")));
+    }
+
+    #[test]
+    fn resolver_salida_subcomando_usa_principal_si_no_hay_local() {
+        let salida = resolver_salida_subcomando(None, &Some("/tmp/global".to_string()));
+
+        assert_eq!(salida.as_deref(), Some(std::path::Path::new("/tmp/global")));
     }
 }

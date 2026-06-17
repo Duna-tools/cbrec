@@ -3,20 +3,32 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "cbrec")]
 #[command(author, version, about = "Grabador de streams simple y eficiente")]
+#[command(after_help = "\
+Ejemplos:
+  cbrec alice
+  cbrec -l alice
+  cbrec record alice --quality 1080p
+  cbrec --output /videos record alice
+  cbrec watch alice --ask --timeout 30
+  cbrec doctor
+
+Notas:
+  Usa --duration para pruebas cortas. Sin --duration, archivos muy pequenos se mueven a small/.
+  Para cookies, prefiere config.toml o CBREC_SESSION_COOKIE; --session-cookie es para uso puntual.")]
 pub struct Cli {
     /// Modelos a grabar (modo principal).
     #[arg(value_name = "MODEL", num_args = 0.., index = 1)]
     pub modelos: Vec<String>,
 
     /// Solo verificar si el modelo esta online.
-    #[arg(short = 'c', long = "check", global = true)]
+    #[arg(short = 'c', long = "check")]
     pub verificar: bool,
 
     /// Listar resoluciones disponibles del stream.
-    #[arg(short = 'l', long = "list", global = true)]
+    #[arg(short = 'l', long = "list")]
     pub listar: bool,
 
-    /// Directorio base de salida (se crea `cb_rec/<modelo>`).
+    /// Directorio base de salida.
     #[arg(short, long)]
     pub output: Option<String>,
 
@@ -24,7 +36,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub ffmpeg_path: Option<String>,
 
-    /// Calidad de video (240p, 480p, 720p, 1080p, best).
+    /// Calidad de video (audio, 240p, 360p, 480p, 720p, 1080p, best).
     #[arg(short, long, default_value = "best")]
     pub quality: String,
 
@@ -36,9 +48,7 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "SECS")]
     pub duration: Option<u64>,
 
-    /// Cookie de sesion de Chaturbate (sobreescribe config).
-    /// Ejemplo: "PHPSESSID=abc123; chaturbatesid=xyz"
-    /// Obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
+    /// Cookie de sesion (menos seguro; prefiere config.toml o CBREC_SESSION_COOKIE).
     #[arg(long, global = true, value_name = "COOKIE")]
     pub session_cookie: Option<String>,
 
@@ -64,7 +74,7 @@ pub enum Commands {
         /// Directorio base de salida.
         #[arg(short, long)]
         output: Option<String>,
-        /// Calidad de video (240p, 480p, 720p, 1080p, best).
+        /// Calidad de video (audio, 240p, 360p, 480p, 720p, 1080p, best).
         #[arg(short, long, default_value = "best")]
         quality: String,
     },
@@ -92,7 +102,7 @@ pub enum Commands {
         /// Directorio base de salida.
         #[arg(short, long)]
         output: Option<String>,
-        /// Calidad de video (240p, 480p, 720p, 1080p, best).
+        /// Calidad de video (audio, 240p, 360p, 480p, 720p, 1080p, best).
         #[arg(short, long, default_value = "best")]
         quality: String,
     },
