@@ -36,6 +36,25 @@ fn parse_record_with_jobs() {
 }
 
 #[test]
+fn parse_record_usa_output_global_si_no_hay_output_local() {
+    let cli = Cli::parse_from(["cbrec", "--output", "/tmp/videos", "record", "alice"]);
+    assert_eq!(cli.output.as_deref(), Some("/tmp/videos"));
+    match cli.command {
+        Some(Commands::Record { output, .. }) => assert!(output.is_none()),
+        _ => panic!("Se esperaba subcomando record"),
+    }
+}
+
+#[test]
+fn parse_record_quality_local() {
+    let cli = Cli::parse_from(["cbrec", "record", "alice", "--quality", "720p"]);
+    match cli.command {
+        Some(Commands::Record { quality, .. }) => assert_eq!(quality, "720p"),
+        _ => panic!("Se esperaba subcomando record"),
+    }
+}
+
+#[test]
 fn parse_check() {
     let cli = Cli::parse_from(["cbrec", "check", "alice"]);
     match cli.command {
@@ -119,6 +138,16 @@ fn parse_watch_no_models() {
     let cli = Cli::parse_from(["cbrec", "watch"]);
     match cli.command {
         Some(Commands::Watch { modelos, .. }) => assert!(modelos.is_empty()),
+        _ => panic!("Se esperaba subcomando watch"),
+    }
+}
+
+#[test]
+fn parse_watch_usa_output_global_si_no_hay_output_local() {
+    let cli = Cli::parse_from(["cbrec", "--output", "/tmp/videos", "watch", "alice"]);
+    assert_eq!(cli.output.as_deref(), Some("/tmp/videos"));
+    match cli.command {
+        Some(Commands::Watch { output, .. }) => assert!(output.is_none()),
         _ => panic!("Se esperaba subcomando watch"),
     }
 }
