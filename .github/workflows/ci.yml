@@ -482,7 +482,7 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          sha256sum * > SHA256SUMS
+          sha256sum -- ./* > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest SHA256SUMS
