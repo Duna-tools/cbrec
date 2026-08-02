@@ -258,6 +258,10 @@ cargo build --release
 RUST_LOG=debug ./target/debug/cbrec nombremodelo
 ```
 
+#### Publicación de versiones
+
+Los cambios destinados a una release deben usar [Conventional Commits](https://www.conventionalcommits.org/): `fix:` incrementa patch, `feat:` incrementa minor y `!` indica un cambio incompatible. Después de aprobar el CI de `main`, Release Please crea o actualiza un PR de versión. Al fusionar ese PR se crea una release en borrador; el pipeline la publica únicamente después de verificar y empaquetar todas las plataformas.
+
 ### Troubleshooting
 
 **El modelo no está online**
@@ -540,6 +544,10 @@ cargo test
 cargo build --release
 RUST_LOG=debug ./target/debug/cbrec modelname
 ```
+
+#### Publishing releases
+
+Changes intended for a release must use [Conventional Commits](https://www.conventionalcommits.org/): `fix:` increments patch, `feat:` increments minor, and `!` marks a breaking change. After `main` CI passes, Release Please creates or updates a version PR. Merging that PR creates a draft release; the pipeline publishes it only after every platform is verified and packaged.
 
 ### Troubleshooting
 
