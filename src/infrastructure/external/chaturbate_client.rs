@@ -1,36 +1,59 @@
 use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::VideoQuality;
 use crate::domain::value_objects::{ModelName, StreamUrl};
+use crate::infrastructure::external::ffmpeg_process::run_ffmpeg;
 use crate::infrastructure::InfrastructureError;
 use async_trait::async_trait;
-use backoff::future::retry;
-use backoff::ExponentialBackoff;
 use quick_m3u8::config::ParsingOptionsBuilder;
 use quick_m3u8::tag::{hls, KnownTag};
 use quick_m3u8::{HlsLine, Reader};
 use reqwest::{Client, StatusCode};
 use serde::Deserialize;
-use std::future;
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Child;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36";
 const HTTP_TIMEOUT_SECS: u64 = 10;
 const HTTP_RETRY_BASE_MS: u64 = 200;
-const FFMPEG_SHUTDOWN_GRACE_SECS: u64 = 15;
-const FFMPEG_STALL_TIMEOUT_SECS: u64 = 120;
-const FFMPEG_STALL_CHECK_SECS: u64 = 5;
+const HTTP_RETRY_MAX_INTERVAL_SECS: u64 = 2;
+const HTTP_RETRY_MAX_ELAPSED_SECS: u64 = 10;
 
-fn make_backoff() -> ExponentialBackoff {
-    ExponentialBackoff {
-        initial_interval: Duration::from_millis(HTTP_RETRY_BASE_MS),
-        max_interval: Duration::from_secs(2),
-        max_elapsed_time: Some(Duration::from_secs(10)),
-        ..Default::default()
+enum RetryFailure<E> {
+    Transient(E),
+    Permanent(E),
+}
+
+fn retry_budget_exceeded(elapsed: Duration, delay: Duration, max_elapsed: Duration) -> bool {
+    elapsed.saturating_add(delay) > max_elapsed
+}
+
+/// Retries transient HTTP failures with bounded deterministic exponential delays.
+///
+/// ponytail: add jitter only if synchronized clients create measurable upstream load spikes.
+async fn retry_with_backoff<T, E, F, Fut>(mut operation: F) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, RetryFailure<E>>>,
+{
+    let started = Instant::now();
+    let max_elapsed = Duration::from_secs(HTTP_RETRY_MAX_ELAPSED_SECS);
+    let max_interval = Duration::from_secs(HTTP_RETRY_MAX_INTERVAL_SECS);
+    let mut delay = Duration::from_millis(HTTP_RETRY_BASE_MS);
+
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(RetryFailure::Permanent(error)) => return Err(error),
+            Err(RetryFailure::Transient(error)) => {
+                if retry_budget_exceeded(started.elapsed(), delay, max_elapsed) {
+                    return Err(error);
+                }
+                tokio::time::sleep(delay).await;
+                delay = delay.saturating_mul(2).min(max_interval);
+            }
+        }
     }
 }
 
@@ -118,11 +141,9 @@ impl ChaturbateClient {
             model_name.as_str()
         );
 
-        let backoff = make_backoff();
-
-        retry(backoff, || async {
+        retry_with_backoff(|| async {
             let response = self.get_request(&url).send().await.map_err(|e| {
-                backoff::Error::transient(InfrastructureError::ExternalService(format!(
+                RetryFailure::Transient(InfrastructureError::ExternalService(format!(
                     "HTTP request failed: {}",
                     e
                 )))
@@ -131,7 +152,7 @@ impl ChaturbateClient {
             match clasificar_status_http(response.status()) {
                 EstadoHttp::Ok => {}
                 EstadoHttp::NoEncontrado => {
-                    return Err(backoff::Error::Permanent(InfrastructureError::Domain(
+                    return Err(RetryFailure::Permanent(InfrastructureError::Domain(
                         crate::domain::errors::DomainError::ModelNotFound(
                             model_name.as_str().to_string(),
                         ),
@@ -144,7 +165,7 @@ impl ChaturbateClient {
                     });
                 }
                 EstadoHttp::Reintentable => {
-                    return Err(backoff::Error::transient(error_status_http(
+                    return Err(RetryFailure::Transient(error_status_http(
                         response.status(),
                     )));
                 }
@@ -156,7 +177,7 @@ impl ChaturbateClient {
             }
 
             let contenido = response.text().await.map_err(|e| {
-                backoff::Error::Permanent(InfrastructureError::ExternalService(format!(
+                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
                     "Failed to read response: {}",
                     e
                 )))
@@ -205,123 +226,19 @@ impl StreamRepository for ChaturbateClient {
             Err(_) => stream_url.clone(),
         };
 
-        let ffmpeg_bin = self
+        let ffmpeg_path = self
             .ffmpeg_path
             .as_deref()
             .unwrap_or_else(|| Path::new("ffmpeg"));
-        let mut command = tokio::process::Command::new(ffmpeg_bin);
-        command.kill_on_drop(true);
-        configurar_aislamiento_ffmpeg(&mut command);
-        command
-            .arg("-hide_banner")
-            .arg("-loglevel")
-            .arg("error")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-
-        if let Some(cookie) = &self.session_cookie {
-            command
-                .arg("-headers")
-                .arg(format!("Cookie: {}\r\n", cookie));
-        }
-
-        let mut child = command
-            .args(duration_args(self.max_duration_secs))
-            .arg("-i")
-            .arg(stream_url.as_str())
-            .arg("-c")
-            .arg("copy")
-            .arg("-y")
-            .arg(output_path)
-            .spawn()
-            .map_err(|e| {
-                InfrastructureError::RecordingError(format!("Failed to start ffmpeg: {}", e))
-            })?;
-        let mut stderr_task = child.stderr.take().map(|mut stderr| {
-            tokio::spawn(async move {
-                let mut buffer = Vec::new();
-                let _ = stderr.read_to_end(&mut buffer).await;
-                buffer
-            })
-        });
-
-        if let Some(mut cancel_rx) = self.cancel_rx.clone() {
-            if *cancel_rx.borrow() {
-                cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                return Err(InfrastructureError::RecordingCancelled);
-            }
-
-            tokio::select! {
-                status = child.wait() => {
-                    match status {
-                        Ok(exit_status) => {
-                            if !exit_status.success() {
-                                let stderr = leer_stderr_ffmpeg(stderr_task.take()).await;
-                                return Err(InfrastructureError::RecordingError(
-                                    formatear_error_ffmpeg(exit_status, &stderr)
-                                ));
-                            }
-                        }
-                        Err(e) => {
-                            return Err(InfrastructureError::RecordingError(
-                                format!("Failed to wait for ffmpeg: {}", e)
-                            ));
-                        }
-                    }
-                }
-                _ = async { cancel_rx.wait_for(|v| *v).await.ok(); } => {
-                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingCancelled);
-                }
-                _ = esperar_limite_grabacion(self.max_duration_secs) => {
-                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingCancelled);
-                }
-                _ = esperar_sin_progreso(
-                    output_path,
-                    Duration::from_secs(FFMPEG_STALL_TIMEOUT_SECS),
-                    Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
-                ) => {
-                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingError(format!(
-                        "FFmpeg no escribio datos nuevos durante {} segundos",
-                        FFMPEG_STALL_TIMEOUT_SECS
-                    )));
-                }
-            }
-        } else {
-            tokio::select! {
-                status = child.wait() => {
-                    let status = status.map_err(|e| {
-                        InfrastructureError::RecordingError(format!("Failed to wait for ffmpeg: {}", e))
-                    })?;
-                    if !status.success() {
-                        let stderr = leer_stderr_ffmpeg(stderr_task.take()).await;
-                        return Err(InfrastructureError::RecordingError(formatear_error_ffmpeg(
-                            status, &stderr,
-                        )));
-                    }
-                }
-                _ = esperar_limite_grabacion(self.max_duration_secs) => {
-                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingCancelled);
-                }
-                _ = esperar_sin_progreso(
-                    output_path,
-                    Duration::from_secs(FFMPEG_STALL_TIMEOUT_SECS),
-                    Duration::from_secs(FFMPEG_STALL_CHECK_SECS),
-                ) => {
-                    cancelar_ffmpeg(&mut child, stderr_task.take()).await;
-                    return Err(InfrastructureError::RecordingError(format!(
-                        "FFmpeg no escribio datos nuevos durante {} segundos",
-                        FFMPEG_STALL_TIMEOUT_SECS
-                    )));
-                }
-            }
-        }
-
-        Ok(())
+        run_ffmpeg(
+            ffmpeg_path,
+            stream_url.as_str(),
+            output_path,
+            self.session_cookie.as_deref(),
+            self.max_duration_secs,
+            self.cancel_rx.clone(),
+        )
+        .await
     }
 }
 
@@ -365,11 +282,9 @@ impl ChaturbateClient {
     }
 
     async fn obtener_playlist(&self, url: &str) -> Result<String, InfrastructureError> {
-        let backoff = make_backoff();
-
-        retry(backoff, || async {
+        retry_with_backoff(|| async {
             let response = self.get_request(url).send().await.map_err(|e| {
-                backoff::Error::transient(InfrastructureError::ExternalService(format!(
+                RetryFailure::Transient(InfrastructureError::ExternalService(format!(
                     "HTTP request failed: {}",
                     e
                 )))
@@ -378,29 +293,29 @@ impl ChaturbateClient {
             match clasificar_status_http(response.status()) {
                 EstadoHttp::Ok => {}
                 EstadoHttp::RateLimited => {
-                    return Err(backoff::Error::transient(InfrastructureError::HttpStatus(
+                    return Err(RetryFailure::Transient(InfrastructureError::HttpStatus(
                         429,
                     )));
                 }
                 EstadoHttp::RequiereSesion => {
-                    return Err(backoff::Error::Permanent(error_status_http(
+                    return Err(RetryFailure::Permanent(error_status_http(
                         response.status(),
                     )));
                 }
                 EstadoHttp::Reintentable => {
-                    return Err(backoff::Error::transient(error_status_http(
+                    return Err(RetryFailure::Transient(error_status_http(
                         response.status(),
                     )));
                 }
                 EstadoHttp::NoEncontrado | EstadoHttp::Permanente => {
-                    return Err(backoff::Error::Permanent(error_status_http(
+                    return Err(RetryFailure::Permanent(error_status_http(
                         response.status(),
                     )));
                 }
             }
 
             response.text().await.map_err(|e| {
-                backoff::Error::Permanent(InfrastructureError::ExternalService(format!(
+                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
                     "Failed to read playlist: {}",
                     e
                 )))
@@ -409,14 +324,6 @@ impl ChaturbateClient {
         .await
     }
 }
-
-#[cfg(unix)]
-fn configurar_aislamiento_ffmpeg(command: &mut tokio::process::Command) {
-    command.process_group(0);
-}
-
-#[cfg(not(unix))]
-fn configurar_aislamiento_ffmpeg(_command: &mut tokio::process::Command) {}
 
 #[derive(Clone, Debug)]
 struct VarianteStream {
@@ -649,138 +556,6 @@ fn resolver_url(base: &str, relativa: &str) -> Result<String, InfrastructureErro
     Ok(url.to_string())
 }
 
-fn duration_args(max_duration_secs: Option<u64>) -> Vec<String> {
-    match max_duration_secs {
-        Some(seconds) => vec!["-t".to_string(), seconds.to_string()],
-        None => Vec::new(),
-    }
-}
-
-async fn esperar_limite_grabacion(max_duration_secs: Option<u64>) {
-    match max_duration_secs {
-        Some(seconds) => tokio::time::sleep(Duration::from_secs(seconds.saturating_add(10))).await,
-        None => future::pending::<()>().await,
-    }
-}
-
-async fn leer_stderr_ffmpeg(stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
-    match stderr_task {
-        Some(task) => task.await.unwrap_or_default(),
-        None => Vec::new(),
-    }
-}
-
-async fn cancelar_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) {
-    if !solicitar_cierre_ffmpeg_por_stdin(child).await {
-        solicitar_cierre_ffmpeg(child);
-    }
-    if tokio::time::timeout(
-        Duration::from_secs(FFMPEG_SHUTDOWN_GRACE_SECS),
-        child.wait(),
-    )
-    .await
-    .is_err()
-    {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-    }
-    let _ = leer_stderr_ffmpeg(stderr_task).await;
-}
-
-async fn solicitar_cierre_ffmpeg_por_stdin(child: &mut Child) -> bool {
-    let Some(mut stdin) = child.stdin.take() else {
-        return false;
-    };
-
-    stdin.write_all(b"q\n").await.is_ok()
-}
-
-async fn esperar_sin_progreso(path: &Path, timeout: Duration, check_interval: Duration) {
-    let mut ultimo_tamano = tamano_archivo(path).await;
-    let mut ultimo_cambio = Instant::now();
-
-    loop {
-        tokio::time::sleep(check_interval).await;
-        let tamano = tamano_archivo(path).await;
-        if tamano > ultimo_tamano {
-            ultimo_tamano = tamano;
-            ultimo_cambio = Instant::now();
-            continue;
-        }
-
-        if ultimo_cambio.elapsed() >= timeout {
-            return;
-        }
-    }
-}
-
-async fn tamano_archivo(path: &Path) -> u64 {
-    tokio::fs::metadata(path)
-        .await
-        .map(|meta| meta.len())
-        .unwrap_or(0)
-}
-
-#[cfg(unix)]
-fn solicitar_cierre_ffmpeg(child: &mut Child) {
-    if let Some(pid) = child.id() {
-        unsafe {
-            libc::kill(pid as i32, libc::SIGINT);
-        }
-    } else {
-        let _ = child.start_kill();
-    }
-}
-
-#[cfg(not(unix))]
-fn solicitar_cierre_ffmpeg(child: &mut Child) {
-    let _ = child.start_kill();
-}
-
-fn formatear_error_ffmpeg(status: ExitStatus, stderr: &[u8]) -> String {
-    match resumen_stderr(stderr) {
-        Some(stderr) => format!("FFmpeg exited with status: {}. stderr: {}", status, stderr),
-        None => format!("FFmpeg exited with status: {}", status),
-    }
-}
-
-fn resumen_stderr(stderr: &[u8]) -> Option<String> {
-    const MAX_CHARS: usize = 1200;
-    const MAX_LINES: usize = 8;
-
-    let texto = String::from_utf8_lossy(stderr);
-    let mut resumen = Vec::new();
-
-    for linea in texto.lines() {
-        let linea = redactar_linea_sensible(linea.trim());
-        if linea.is_empty() {
-            continue;
-        }
-        resumen.push(linea);
-        if resumen.len() >= MAX_LINES {
-            break;
-        }
-    }
-
-    let mut texto = resumen.join(" | ");
-    if texto.is_empty() {
-        return None;
-    }
-    if texto.chars().count() > MAX_CHARS {
-        texto = texto.chars().take(MAX_CHARS).collect();
-        texto.push_str("...");
-    }
-    Some(texto)
-}
-
-fn redactar_linea_sensible(linea: &str) -> String {
-    if linea.to_ascii_lowercase().contains("cookie:") {
-        "Cookie: [redacted]".to_string()
-    } else {
-        linea.to_string()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,13 +685,61 @@ hi.m3u8
         );
     }
 
+    #[tokio::test]
+    async fn retry_with_backoff_retries_transient_error() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_attempts = attempts.clone();
+
+        let result = retry_with_backoff(|| {
+            let attempt = operation_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                if attempt == 0 {
+                    Err(RetryFailure::Transient("retry"))
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(result, Ok("ok"));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_does_not_retry_permanent_error() {
+        let attempts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let operation_attempts = attempts.clone();
+
+        let result: Result<(), &str> = retry_with_backoff(|| {
+            operation_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async { Err(RetryFailure::Permanent("stop")) }
+        })
+        .await;
+
+        assert_eq!(result, Err("stop"));
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
     #[test]
-    fn duration_args_agrega_limite_de_ffmpeg() {
-        assert_eq!(
-            duration_args(Some(20)),
-            vec!["-t".to_string(), "20".to_string()]
-        );
-        assert!(duration_args(None).is_empty());
+    fn retry_budget_distinguishes_limit_boundary() {
+        let max_elapsed = Duration::from_secs(10);
+
+        assert!(!retry_budget_exceeded(
+            Duration::from_secs(7),
+            Duration::from_secs(2),
+            max_elapsed
+        ));
+        assert!(!retry_budget_exceeded(
+            Duration::from_secs(8),
+            Duration::from_secs(2),
+            max_elapsed
+        ));
+        assert!(retry_budget_exceeded(
+            Duration::from_secs(9),
+            Duration::from_secs(2),
+            max_elapsed
+        ));
     }
 
     #[test]
@@ -985,26 +808,6 @@ hi.m3u8
         let estado = clasificar_chat_video_context(r#"{"hls_source":"not-a-url"}"#);
 
         assert!(matches!(estado, EstadoStream::RespuestaInesperada { .. }));
-    }
-
-    #[test]
-    fn resumen_stderr_omite_salida_vacia() {
-        assert_eq!(resumen_stderr(b"\n  \n"), None);
-    }
-
-    #[test]
-    fn resumen_stderr_redacta_cookie() {
-        let resumen = resumen_stderr(b"Cookie: PHPSESSID=secret; other=value\nfallo").unwrap();
-
-        assert_eq!(resumen, "Cookie: [redacted] | fallo");
-    }
-
-    #[test]
-    fn resumen_stderr_limita_lineas() {
-        let stderr = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n";
-        let resumen = resumen_stderr(stderr).unwrap();
-
-        assert_eq!(resumen, "1 | 2 | 3 | 4 | 5 | 6 | 7 | 8");
     }
 
     #[tokio::test]
@@ -1124,24 +927,6 @@ hi.m3u8
             .to_string()
             .contains("Invalid playlist: missing #EXTM3U header"));
         let _ = request_task.await.expect("request task");
-    }
-
-    #[tokio::test]
-    async fn esperar_sin_progreso_detecta_archivo_estancado() {
-        let path = std::env::temp_dir().join(format!(
-            "cbrec_stall_{}.part.mp4",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or_default()
-        ));
-        tokio::fs::write(&path, b"datos")
-            .await
-            .expect("crea parcial");
-
-        esperar_sin_progreso(&path, Duration::from_millis(20), Duration::from_millis(5)).await;
-
-        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]

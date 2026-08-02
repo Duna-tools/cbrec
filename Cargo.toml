@@ -42,7 +42,6 @@ bytes = "1.5"
 libc = "0.2.180"
 directories = "5.0"
 quick-m3u8 = "0.7"
-backoff = { version = "0.4.0", features = ["tokio"] }
 
 [profile.release]
 lto = true
