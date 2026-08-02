@@ -8,10 +8,20 @@ on:
   pull_request:
     branches: [main, master, develop]
   workflow_dispatch:
+    inputs:
+      build_packages:
+        description: Build distributable packages
+        required: true
+        type: boolean
+        default: true
+      release_tag:
+        description: Existing release tag to package and publish
+        required: false
+        type: string
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+  group: ${{ github.workflow }}-${{ inputs.release_tag || github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') && inputs.release_tag == '' }}
 
 permissions:
   contents: read
@@ -45,6 +55,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Check GitHub Actions workflows (ubuntu only)
         if: matrix.os == 'ubuntu-latest'
@@ -106,6 +118,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -130,7 +144,7 @@ jobs:
   package:
     name: Package (${{ matrix.dist_prefix }})
     needs: [test, audit]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.build_packages)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
@@ -164,6 +178,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Setup Rust (stable + target)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -176,11 +192,11 @@ jobs:
 
       # ── Verificar que el tag coincide con Cargo.toml ──────
       - name: Verify tag vs Cargo.toml (bash)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ github.ref_name }}"
+          tag="${{ inputs.release_tag || github.ref_name }}"
           ver="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)"
           if [[ "v${ver}" != "${tag}" ]]; then
             echo "ERROR: Tag (${tag}) != Cargo.toml version (v${ver})"
@@ -188,10 +204,10 @@ jobs:
           fi
 
       - name: Verify tag vs Cargo.toml (pwsh)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
+        if: (startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != '') && runner.os == 'Windows'
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}"
+          $tag = "${{ inputs.release_tag || github.ref_name }}"
           $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"' |
                   Select-Object -First 1).Line
           $ver = ($ver -split '"')[1]
@@ -395,7 +411,7 @@ jobs:
           if-no-files-found: error
 
       - name: Attest dist artifacts
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
         uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
         with:
           subject-path: dist/*
@@ -407,7 +423,7 @@ jobs:
   pkgbuild:
     name: Generate Arch PKGBUILD
     needs: [test, audit]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -418,11 +434,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Generate PKGBUILD from template
         shell: bash
         env:
-          VERSION: ${{ github.ref_name }}
+          VERSION: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           VER="${VERSION#v}"
@@ -461,7 +479,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [package, pkgbuild]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -491,6 +509,7 @@ jobs:
           subject-path: dist/SHA256SUMS
 
       - name: Create release notes
+        if: inputs.release_tag == ''
         shell: bash
         env:
           VERSION: ${{ github.ref_name }}
@@ -543,11 +562,20 @@ jobs:
           Los assets de release y \`SHA256SUMS\` incluyen artifact attestations de GitHub Actions.
           EOF
 
-      - name: Create GitHub Release
+      - name: Create release from tag
+        if: inputs.release_tag == ''
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           body_path: release_notes.md
+          files: dist/*
+          fail_on_unmatched_files: true
+
+      - name: Publish automated release
+        if: inputs.release_tag != ''
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
           files: dist/*
           fail_on_unmatched_files: true

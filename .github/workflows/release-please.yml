@@ -1,0 +1,50 @@
+name: Prepare Release
+
+on:
+  workflow_run:
+    workflows: [Build & Release]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Prepare or create release
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Prepare release
+        id: release
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+
+      - name: Validate release pull request
+        if: steps.release.outputs.prs_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_BRANCH: ${{ fromJSON(steps.release.outputs.pr).headBranchName }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --ref "$RELEASE_BRANCH" -f build_packages=false
+
+      - name: Build release artifacts
+        if: steps.release.outputs.release_created == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml --ref main \
+            -f build_packages=true \
+            -f release_tag="$RELEASE_TAG"
