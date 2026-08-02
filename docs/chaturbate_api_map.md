@@ -13,6 +13,8 @@ The following read-only endpoints were checked once from the development environ
 | Endpoint | Authentication | Status | Observed response shape |
 |---|---|---|---|
 | `/api/ts/roomlist/room-list/?limit=1&offset=0` | None observed | PASS | Object containing `rooms` and pagination metadata |
+| `/api/ts/roomlist/room-list/?hashtags={tag}&limit=5` | None observed | PASS | Five of five returned rooms contained the requested tag |
+| `/api/ts/roomlist/room-list/?search={term}&limit=5` | None observed | FAIL | The response contained no username or subject matching the requested live username |
 | `/api/chatvideocontext/{username}/` | None observed for a public room | PASS | Object containing `room_status` and stream context |
 | `/api/biocontext/{username}/` | None observed for a public room | PASS | Broadcaster profile object |
 | `/api/panel_context/{username}/` | None observed for a public room | PASS | Panel context object |
@@ -259,7 +261,7 @@ months=1
 
 | Endpoint | Method | Params | Description |
 |---|---|---|---|
-| `/api/ts/roomlist/room-list/` | GET | `search={term}` | Search rooms by text |
+| `/api/ts/roomlist/room-list/` | GET | `search={term}` | Did not filter results during the 2026-08-02 check; contract unresolved |
 | `/api/ts/roomlist/room-list/` | GET | `private=true` | Rooms currently in private/spy show |
 | `/api/ts/roomlist/room-list/` | GET | `hidden=true&private=false` | Hidden rooms |
 
