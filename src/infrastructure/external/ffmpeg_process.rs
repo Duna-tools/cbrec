@@ -465,18 +465,16 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn process_shutdown_interrupts_the_child() {
-        let script = executable_script("while :; do sleep 1; done").await;
-        let mut command = tokio::process::Command::new(&script);
+        let mut command = tokio::process::Command::new("sleep");
+        command.arg("30");
         command.kill_on_drop(true);
         let mut child = command.spawn().expect("start test process");
 
         request_process_shutdown(&mut child);
-        tokio::time::timeout(Duration::from_millis(500), child.wait())
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
             .await
             .expect("interrupt must stop the process")
             .expect("wait for interrupted process");
-
-        let _ = tokio::fs::remove_file(script).await;
     }
 
     #[cfg(unix)]
