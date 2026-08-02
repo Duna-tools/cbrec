@@ -191,16 +191,32 @@ async fn wait_for_stall(path: &Path, timeout: Duration, check_interval: Duration
     loop {
         tokio::time::sleep(check_interval).await;
         let size = file_size(path).await;
-        if size > last_size {
-            last_size = size;
-            last_change = Instant::now();
-            continue;
-        }
-
-        if last_change.elapsed() >= timeout {
+        if file_has_stalled(
+            &mut last_size,
+            &mut last_change,
+            size,
+            Instant::now(),
+            timeout,
+        ) {
             return;
         }
     }
+}
+
+fn file_has_stalled(
+    last_size: &mut u64,
+    last_change: &mut Instant,
+    size: u64,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    if size > *last_size {
+        *last_size = size;
+        *last_change = now;
+        return false;
+    }
+
+    now.duration_since(*last_change) >= timeout
 }
 
 async fn file_size(path: &Path) -> u64 {
@@ -362,43 +378,34 @@ mod tests {
         let _ = tokio::fs::remove_file(path).await;
     }
 
-    #[tokio::test]
-    async fn file_growth_resets_stall_deadline() {
-        let path = std::env::temp_dir().join(format!(
-            "cbrec_growth_{}.part.mp4",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
+    #[test]
+    fn file_growth_resets_stall_deadline() {
+        let started = Instant::now();
+        let timeout = Duration::from_millis(40);
+        let mut last_size = 4;
+        let mut last_change = started;
+
+        assert!(!file_has_stalled(
+            &mut last_size,
+            &mut last_change,
+            9,
+            started + Duration::from_millis(25),
+            timeout,
         ));
-        tokio::fs::write(&path, b"data")
-            .await
-            .expect("create partial file");
-        let wait_path = path.clone();
-        let waiter = tokio::spawn(async move {
-            wait_for_stall(
-                &wait_path,
-                Duration::from_millis(40),
-                Duration::from_millis(5),
-            )
-            .await;
-        });
-
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        tokio::fs::write(&path, b"more data")
-            .await
-            .expect("grow partial file");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-        assert!(
-            !waiter.is_finished(),
-            "growth must reset the stall deadline"
-        );
-        tokio::time::timeout(Duration::from_millis(100), waiter)
-            .await
-            .expect("stalled file must eventually be detected")
-            .expect("stall task must finish cleanly");
-
-        let _ = tokio::fs::remove_file(path).await;
+        assert!(!file_has_stalled(
+            &mut last_size,
+            &mut last_change,
+            9,
+            started + Duration::from_millis(64),
+            timeout,
+        ));
+        assert!(file_has_stalled(
+            &mut last_size,
+            &mut last_change,
+            9,
+            started + Duration::from_millis(65),
+            timeout,
+        ));
     }
 
     #[tokio::test]
