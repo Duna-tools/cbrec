@@ -78,6 +78,16 @@ pub enum Commands {
     /// Revisa configuracion, ffmpeg y rutas antes de grabar.
     Doctor,
 
+    /// Descubre modelos online por tag.
+    Discover {
+        /// Tag a buscar, con o sin `#`.
+        #[arg(long)]
+        tag: String,
+        /// Numero maximo de resultados (1-50).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Monitoriza modelos y graba automaticamente cuando se conectan.
     Watch {
         /// Modelos a monitorizar (opcional si ya hay lista guardada).

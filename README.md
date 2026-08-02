@@ -157,6 +157,12 @@ cbrec alice -l
 # Revisar FFmpeg, configuracion, salida y lista watch
 cbrec doctor
 
+# Descubrir hasta 20 modelos online por tag
+cbrec discover --tag gaming
+
+# Limitar los resultados
+cbrec discover --tag gaming --limit 5
+
 # Ver ayuda
 cbrec --help
 cbrec watch --help

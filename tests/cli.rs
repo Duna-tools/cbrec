@@ -51,6 +51,18 @@ fn parse_doctor_command() {
 }
 
 #[test]
+fn parse_discover_command() {
+    let cli = Cli::parse_from(["cbrec", "discover", "--tag", "gaming", "--limit", "5"]);
+    match cli.command {
+        Some(Commands::Discover { tag, limit }) => {
+            assert_eq!(tag, "gaming");
+            assert_eq!(limit, 5);
+        }
+        _ => panic!("Se esperaba subcomando discover"),
+    }
+}
+
+#[test]
 fn parse_ffmpeg_path_global() {
     let cli = Cli::parse_from(["cbrec", "record", "alice", "--ffmpeg-path", "/tmp/ffmpeg"]);
     assert_eq!(cli.ffmpeg_path.as_deref(), Some("/tmp/ffmpeg"));
