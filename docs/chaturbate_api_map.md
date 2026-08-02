@@ -2,13 +2,34 @@
 
 > Captured via Chrome DevTools MCP — 2026-06-07  
 > Base: `https://chaturbate.com` (English)  
-> Auth required: `sessionid` + `csrftoken` cookies
+> Authentication varies by endpoint; do not send session cookies unless required.
+
+---
+
+## Verification Status
+
+The following read-only endpoints were checked once from the development environment on 2026-08-02 without cookies. `PASS` means that the request returned HTTP 200 with an `application/json` content type during that run; it is not a stability guarantee. Endpoints not listed in this table are `NOT RUN`.
+
+| Endpoint | Authentication | Status | Observed response shape |
+|---|---|---|---|
+| `/api/ts/roomlist/room-list/?limit=1&offset=0` | None observed | PASS | Object containing `rooms` and pagination metadata |
+| `/api/chatvideocontext/{username}/` | None observed for a public room | PASS | Object containing `room_status` and stream context |
+| `/api/biocontext/{username}/` | None observed for a public room | PASS | Broadcaster profile object |
+| `/api/panel_context/{username}/` | None observed for a public room | PASS | Panel context object |
+| `/api/ts/games/current/room/{username}` | None observed for a public room | PASS | JSON object or `null` |
+| `/api/more_like/{username}/` | None observed for a public room | PASS | Object containing recommendations |
+| `/api/ts/roomlist/all-tags/?limit=1&offset=0` | None observed | PASS | Object containing `all_tags` |
+| `/api/ts/hashtags/top_tags/?count=1` | None observed | PASS | Object containing `all_tags` and `featured_tag` |
+
+Run `scripts/probe_readonly_apis.sh <public-model-name>` to repeat this limited check. The probe uses a fixed allowlist, sends no cookies, prints no response bodies, and performs no POST requests.
+
+State-changing endpoints such as chat messages, follow/unfollow, tipping, fan club enrollment, and cashout remain `NOT RUN`. They must not be included in automated probes because they can modify account state or transfer value.
 
 ---
 
 ## Authentication
 
-All requests require session cookies. CSRF token must be sent as:
+Authenticated requests require session cookies. State-changing POST requests also require a CSRF token sent as:
 - Header: `X-Requested-With: XMLHttpRequest`
 - POST body field: `csrfmiddlewaretoken=<token>`
 
