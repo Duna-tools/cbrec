@@ -12,3 +12,14 @@ impl std::fmt::Display for EstadoModelo {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn displays_stable_state_names() {
+        assert_eq!(EstadoModelo::Offline.to_string(), "offline");
+        assert_eq!(EstadoModelo::Grabando.to_string(), "grabando");
+    }
+}

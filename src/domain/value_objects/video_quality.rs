@@ -55,3 +55,47 @@ impl VideoQuality {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_aliases_case_insensitively() {
+        let cases = [
+            ("AUDIO_ONLY", VideoQuality::AudioOnly),
+            ("240", VideoQuality::P240),
+            ("360P", VideoQuality::P360),
+            ("480", VideoQuality::P480),
+            ("720p", VideoQuality::P720),
+            ("1080", VideoQuality::P1080),
+            ("BEST", VideoQuality::Best),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(input.parse(), Ok(expected));
+        }
+        assert_eq!(
+            "4k".parse::<VideoQuality>(),
+            Err("Calidad invalida: 4k".into())
+        );
+    }
+
+    #[test]
+    fn exposes_display_value_and_target_height() {
+        let cases = [
+            (VideoQuality::AudioOnly, "audio", Some(0)),
+            (VideoQuality::P240, "240p", Some(240)),
+            (VideoQuality::P360, "360p", Some(360)),
+            (VideoQuality::P480, "480p", Some(480)),
+            (VideoQuality::P720, "720p", Some(720)),
+            (VideoQuality::P1080, "1080p", Some(1080)),
+            (VideoQuality::Best, "best", None),
+        ];
+
+        for (quality, display, height) in cases {
+            assert_eq!(quality.to_string(), display);
+            assert_eq!(quality.target_height(), height);
+        }
+    }
+}

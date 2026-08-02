@@ -236,3 +236,32 @@ async fn grabar_modelo(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::presentation::ConsoleOutput;
+
+    #[tokio::test]
+    async fn pre_cancelled_batch_does_not_start_recording() {
+        let (_cancel_tx, cancel_rx) = tokio::sync::watch::channel(true);
+        let parameters = ParametrosGrabacion {
+            raiz_salida: None,
+            quality: VideoQuality::Best,
+            limite_concurrencia: 1,
+            min_file_size: None,
+            cancel_rx,
+            salida: Arc::new(ConsoleOutput::new(false, true)),
+        };
+
+        let result = grabar_modelos(
+            ChaturbateClient::new().expect("create client"),
+            AppConfig::default(),
+            vec!["alice".to_string()],
+            parameters,
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+}
