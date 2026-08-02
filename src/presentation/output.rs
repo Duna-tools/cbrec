@@ -45,6 +45,9 @@ pub trait Output: Send + Sync {
     fn doctor_warn(&self, _area: &str, _detalle: &str) {}
     fn doctor_error(&self, _area: &str, _detalle: &str) {}
     fn doctor_resumen(&self, _fallos: usize, _advertencias: usize) {}
+    fn discovery_started(&self, _tag: &str, _count: usize) {}
+    fn discovery_room(&self, _username: &str, _viewers: u64, _show: &str, _subject: &str) {}
+    fn discovery_empty(&self, _tag: &str) {}
     fn watch_inicio(&self, modelos: &[&str]);
     fn watch_tick_online(&self, modelo: &str);
     fn watch_tick_offline(&self, modelo: &str);
@@ -352,6 +355,26 @@ impl Output for ConsoleOutput {
         }
     }
 
+    fn discovery_started(&self, tag: &str, count: usize) {
+        if !self.quiet {
+            println!("{} resultado(s) para #{}", count, tag.cyan());
+        }
+    }
+
+    fn discovery_room(&self, username: &str, viewers: u64, show: &str, subject: &str) {
+        println!(
+            "[{}] {} espectadores | {} | {}",
+            username.cyan(),
+            viewers,
+            sanitize_external_text(show),
+            sanitize_external_text(subject)
+        );
+    }
+
+    fn discovery_empty(&self, tag: &str) {
+        println!("Sin resultados para #{}", tag.cyan());
+    }
+
     fn watch_inicio(&self, modelos: &[&str]) {
         if self.quiet {
             return;
@@ -447,4 +470,29 @@ fn formatear_calidades(calidades: &[(Option<u32>, Option<u64>)]) -> String {
 
 fn ahora() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
+}
+
+fn sanitize_external_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .take(120)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_external_text;
+
+    #[test]
+    fn external_text_cannot_inject_terminal_controls() {
+        assert_eq!(sanitize_external_text("ok\n\u{1b}[31m"), "ok  [31m");
+        assert_eq!(sanitize_external_text(&"a".repeat(121)).len(), 120);
+    }
 }

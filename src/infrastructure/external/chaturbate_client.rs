@@ -63,6 +63,29 @@ struct ChatVideoContext {
     room_status: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct RoomListResponse {
+    #[serde(default)]
+    rooms: Vec<RoomListEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoomListEntry {
+    username: Option<String>,
+    room_subject: Option<String>,
+    tags: Option<Vec<String>>,
+    num_users: Option<u64>,
+    current_show: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiscoveredRoom {
+    pub(crate) username: String,
+    pub(crate) subject: String,
+    pub(crate) viewers: u64,
+    pub(crate) show: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EstadoStream {
     Online { stream_url: StreamUrl },
@@ -184,6 +207,73 @@ impl ChaturbateClient {
             })?;
 
             Ok(clasificar_chat_video_context(&contenido))
+        })
+        .await
+    }
+
+    pub(crate) async fn discover_rooms_by_tag(
+        &self,
+        tag: &str,
+        limit: usize,
+    ) -> Result<Vec<DiscoveredRoom>, InfrastructureError> {
+        let url = format!("{}/api/ts/roomlist/room-list/", self.base_url);
+
+        retry_with_backoff(|| async {
+            let response = self
+                .client
+                .get(&url)
+                .query(&[("hashtags", tag), ("limit", &limit.to_string())])
+                .send()
+                .await
+                .map_err(|error| {
+                    RetryFailure::Transient(InfrastructureError::ExternalService(format!(
+                        "HTTP request failed: {error}"
+                    )))
+                })?;
+
+            match clasificar_status_http(response.status()) {
+                EstadoHttp::Ok => {}
+                EstadoHttp::RateLimited | EstadoHttp::Reintentable => {
+                    return Err(RetryFailure::Transient(error_status_http(
+                        response.status(),
+                    )));
+                }
+                EstadoHttp::NoEncontrado | EstadoHttp::RequiereSesion | EstadoHttp::Permanente => {
+                    return Err(RetryFailure::Permanent(error_status_http(
+                        response.status(),
+                    )));
+                }
+            }
+
+            let content = response.text().await.map_err(|error| {
+                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
+                    "Failed to read response: {error}"
+                )))
+            })?;
+            let response: RoomListResponse = serde_json::from_str(&content).map_err(|error| {
+                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
+                    "Invalid room list response: {error}"
+                )))
+            })?;
+
+            Ok(response
+                .rooms
+                .into_iter()
+                .filter_map(|room| {
+                    let tags = room.tags.unwrap_or_default();
+                    if !tags.iter().any(|value| value.eq_ignore_ascii_case(tag)) {
+                        return None;
+                    }
+                    let username = ModelName::try_from(room.username?).ok()?;
+                    Some(DiscoveredRoom {
+                        username: username.as_str().to_string(),
+                        subject: room.room_subject.unwrap_or_default(),
+                        viewers: room.num_users.unwrap_or_default(),
+                        show: room.current_show.unwrap_or_else(|| "unknown".to_string()),
+                    })
+                })
+                .take(limit)
+                .collect())
         })
         .await
     }
@@ -949,6 +1039,38 @@ hi.m3u8
         assert!(request
             .to_ascii_lowercase()
             .contains("cookie: phpsessid=abc; chaturbatesid=xyz"));
+    }
+
+    #[tokio::test]
+    async fn discover_rooms_filters_tag_and_omits_cookie() {
+        let body = r#"{"rooms":[{"username":"Alice","room_subject":"hello","tags":["Gaming"],"num_users":42,"current_show":"public"},{"username":"bob","tags":["music"]}]}"#;
+        let Some((base_url, request_task)) = servidor_http_falso(200, body).await else {
+            return;
+        };
+        let mut client = ChaturbateClient::new()
+            .expect("crea cliente")
+            .with_session_cookie("PHPSESSID=secret".to_string());
+        client.base_url = base_url;
+
+        let rooms = client
+            .discover_rooms_by_tag("gaming", 2)
+            .await
+            .expect("discover rooms");
+
+        assert_eq!(
+            rooms,
+            vec![DiscoveredRoom {
+                username: "alice".to_string(),
+                subject: "hello".to_string(),
+                viewers: 42,
+                show: "public".to_string(),
+            }]
+        );
+        let request = request_task.await.expect("request task");
+        assert!(
+            request.starts_with("GET /api/ts/roomlist/room-list/?hashtags=gaming&limit=2 HTTP/1.1")
+        );
+        assert!(!request.to_ascii_lowercase().contains("cookie:"));
     }
 
     async fn servidor_http_falso(

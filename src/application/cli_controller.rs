@@ -1,4 +1,4 @@
-use crate::application::commands::{add, check, doctor, list, record, remove};
+use crate::application::commands::{add, check, discover, doctor, list, record, remove};
 use crate::application::utils::{
     aplicar_ffmpeg_path, normalizar_modelos, resolver_ffmpeg_path, resolver_ruta_opcional,
     validar_ffmpeg, ParametrosGrabacion, FFMPEG_ENV, SESSION_COOKIE_ENV,
@@ -117,6 +117,9 @@ pub async fn ejecutar_cli(
                 salida.as_ref(),
             )
             .await
+        }
+        Some(Commands::Discover { tag, limit }) => {
+            discover::discover_rooms(&client, salida.as_ref(), &tag, limit).await
         }
         Some(Commands::Watch {
             modelos,
