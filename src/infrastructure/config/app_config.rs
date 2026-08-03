@@ -43,6 +43,7 @@ pub struct AuthConfig {
 pub struct AppConfig {
     pub output_root: PathBuf,
     pub min_file_size: u64,
+    pub min_free_space: u64,
     pub naming_template: String,
     pub watch: WatchConfig,
     pub auth: AuthConfig,
@@ -139,6 +140,7 @@ impl Default for AppConfig {
         Self {
             output_root,
             min_file_size: 262_144_000,
+            min_free_space: 2_147_483_648,
             naming_template: "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
                 .to_string(),
             watch: WatchConfig::default(),
@@ -301,6 +303,9 @@ impl AppConfig {
             }
             if let Some(v) = general.min_file_size {
                 self.min_file_size = v;
+            }
+            if let Some(v) = general.min_free_space {
+                self.min_free_space = v;
             }
         }
         if let Some(naming) = file_config.naming {
@@ -642,6 +647,7 @@ struct FileConfig {
 struct GeneralConfig {
     output_root: Option<String>,
     min_file_size: Option<u64>,
+    min_free_space: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -761,6 +767,7 @@ mod tests {
     fn app_config_parcial_mantiene_defaults() {
         let mut cfg = AppConfig::default();
         let min_file_size_default = cfg.min_file_size;
+        let min_free_space_default = cfg.min_free_space;
         let poll_idle_default = cfg.watch.poll_interval_idle_secs;
 
         cfg.aplicar_toml(
@@ -777,6 +784,7 @@ session_cookie = "PHPSESSID=abc"
         assert_eq!(cfg.watch.poll_interval_secs, 15);
         assert_eq!(cfg.watch.poll_interval_idle_secs, poll_idle_default);
         assert_eq!(cfg.min_file_size, min_file_size_default);
+        assert_eq!(cfg.min_free_space, min_free_space_default);
         assert_eq!(cfg.auth.session_cookie.as_deref(), Some("PHPSESSID=abc"));
     }
 
@@ -789,6 +797,7 @@ session_cookie = "PHPSESSID=abc"
 [general]
 output_root = "/tmp/cbrec-videos"
 min_file_size = 1024
+min_free_space = 2048
 
 [naming]
 template = "{model}.mp4"
@@ -809,6 +818,7 @@ notif_cuerpo = "cuerpo {modelo}"
 
         assert_eq!(cfg.output_root, PathBuf::from("/tmp/cbrec-videos"));
         assert_eq!(cfg.min_file_size, 1024);
+        assert_eq!(cfg.min_free_space, 2048);
         assert_eq!(cfg.naming_template, "{model}.mp4");
         assert_eq!(cfg.watch.poll_interval_secs, 10);
         assert_eq!(cfg.watch.poll_interval_idle_secs, 120);
