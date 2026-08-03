@@ -165,6 +165,10 @@ cbrec discover --tag gaming
 # Limitar los resultados
 cbrec discover --tag gaming --limit 5
 
+# Salida JSON para automatizacion
+cbrec check alice --json
+cbrec discover --tag gaming --json
+
 # Ver ayuda
 cbrec --help
 cbrec watch --help
@@ -452,6 +456,13 @@ cbrec alice -l
 
 # Check FFmpeg, configuration, output, and watch list
 cbrec doctor
+
+# Discover online models by tag
+cbrec discover --tag gaming --limit 5
+
+# JSON output for automation
+cbrec check alice --json
+cbrec discover --tag gaming --json
 
 # Show help
 cbrec --help

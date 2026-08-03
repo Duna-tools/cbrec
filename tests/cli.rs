@@ -39,7 +39,10 @@ fn parse_record_with_jobs() {
 fn parse_check() {
     let cli = Cli::parse_from(["cbrec", "check", "alice"]);
     match cli.command {
-        Some(Commands::Check { model }) => assert_eq!(model, "alice"),
+        Some(Commands::Check { model, json }) => {
+            assert_eq!(model, "alice");
+            assert!(!json);
+        }
         _ => panic!("Se esperaba subcomando check"),
     }
 }
@@ -54,12 +57,28 @@ fn parse_doctor_command() {
 fn parse_discover_command() {
     let cli = Cli::parse_from(["cbrec", "discover", "--tag", "gaming", "--limit", "5"]);
     match cli.command {
-        Some(Commands::Discover { tag, limit }) => {
+        Some(Commands::Discover { tag, limit, json }) => {
             assert_eq!(tag, "gaming");
             assert_eq!(limit, 5);
+            assert!(!json);
         }
         _ => panic!("Se esperaba subcomando discover"),
     }
+}
+
+#[test]
+fn parse_json_query_flags() {
+    let check = Cli::parse_from(["cbrec", "check", "alice", "--json"]);
+    assert!(matches!(
+        check.command,
+        Some(Commands::Check { json: true, .. })
+    ));
+
+    let discover = Cli::parse_from(["cbrec", "discover", "--tag", "gaming", "--json"]);
+    assert!(matches!(
+        discover.command,
+        Some(Commands::Discover { json: true, .. })
+    ));
 }
 
 #[test]
