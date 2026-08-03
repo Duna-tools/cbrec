@@ -169,6 +169,9 @@ cbrec discover --tag gaming --limit 5
 cbrec check alice --json
 cbrec discover --tag gaming --json
 
+# Explorador TUI opcional; salir con q o Esc
+cbrec tui --tag gaming
+
 # Ver ayuda
 cbrec --help
 cbrec watch --help
@@ -463,6 +466,9 @@ cbrec discover --tag gaming --limit 5
 # JSON output for automation
 cbrec check alice --json
 cbrec discover --tag gaming --json
+
+# Optional TUI browser; quit with q or Esc
+cbrec tui --tag gaming
 
 # Show help
 cbrec --help

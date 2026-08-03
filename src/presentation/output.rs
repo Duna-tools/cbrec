@@ -472,7 +472,8 @@ fn ahora() -> String {
     chrono::Local::now().format("%H:%M:%S").to_string()
 }
 
-fn sanitize_external_text(value: &str) -> String {
+/// Removes terminal controls and limits untrusted text to 120 characters.
+pub(crate) fn sanitize_external_text(value: &str) -> String {
     value
         .chars()
         .map(|character| {

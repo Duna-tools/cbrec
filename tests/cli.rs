@@ -82,6 +82,18 @@ fn parse_json_query_flags() {
 }
 
 #[test]
+fn parse_tui_command() {
+    let cli = Cli::parse_from(["cbrec", "tui", "--tag", "gaming", "--limit", "10"]);
+    match cli.command {
+        Some(Commands::Tui { tag, limit }) => {
+            assert_eq!(tag, "gaming");
+            assert_eq!(limit, 10);
+        }
+        _ => panic!("Se esperaba subcomando tui"),
+    }
+}
+
+#[test]
 fn parse_ffmpeg_path_global() {
     let cli = Cli::parse_from(["cbrec", "record", "alice", "--ffmpeg-path", "/tmp/ffmpeg"]);
     assert_eq!(cli.ffmpeg_path.as_deref(), Some("/tmp/ffmpeg"));

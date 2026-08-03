@@ -5,3 +5,4 @@ pub(crate) mod doctor;
 pub(crate) mod list;
 pub(crate) mod record;
 pub(crate) mod remove;
+pub(crate) mod tui;

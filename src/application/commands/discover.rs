@@ -7,10 +7,13 @@ use serde::Serialize;
 
 const MAX_RESULTS: usize = 50;
 
+/// Validated discovery response shared by terminal presentation adapters.
 #[derive(Serialize)]
-struct DiscoveryResult {
-    tag: String,
-    rooms: Vec<DiscoveredRoom>,
+pub(crate) struct DiscoveryResult {
+    /// Normalized tag without a leading hash.
+    pub(crate) tag: String,
+    /// Public rooms matching the requested tag and limit.
+    pub(crate) rooms: Vec<DiscoveredRoom>,
 }
 
 pub(crate) async fn discover_rooms(
@@ -43,7 +46,8 @@ pub(crate) async fn discover_rooms_json(
     )?)
 }
 
-async fn find_rooms(
+/// Validates the query and returns at most 50 matching public rooms.
+pub(crate) async fn find_rooms(
     client: &ChaturbateClient,
     raw_tag: &str,
     limit: usize,

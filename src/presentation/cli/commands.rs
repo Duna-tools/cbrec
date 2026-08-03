@@ -94,6 +94,16 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Explora modelos por tag en una interfaz interactiva.
+    Tui {
+        /// Tag a buscar, con o sin `#`.
+        #[arg(long)]
+        tag: String,
+        /// Numero maximo de resultados (1-50).
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+
     /// Monitoriza modelos y graba automaticamente cuando se conectan.
     Watch {
         /// Modelos a monitorizar (opcional si ya hay lista guardada).
