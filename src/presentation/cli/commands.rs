@@ -73,6 +73,9 @@ pub enum Commands {
     Check {
         /// Nombre del modelo.
         model: String,
+        /// Emite una unica respuesta JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Revisa configuracion, ffmpeg y rutas antes de grabar.
@@ -86,6 +89,9 @@ pub enum Commands {
         /// Numero maximo de resultados (1-50).
         #[arg(long, default_value_t = 20)]
         limit: usize,
+        /// Emite una unica respuesta JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Monitoriza modelos y graba automaticamente cuando se conectan.

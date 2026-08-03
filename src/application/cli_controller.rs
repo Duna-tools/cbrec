@@ -106,8 +106,13 @@ pub async fn ejecutar_cli(
             };
             record::grabar_modelos(client, config, modelos, parametros).await
         }
-        Some(Commands::Check { model }) => {
-            check::verificar_modelo(&client, salida.as_ref(), &model).await
+        Some(Commands::Check { model, json }) => {
+            if json {
+                println!("{}", check::check_model_json(&client, &model).await?);
+                Ok(())
+            } else {
+                check::verificar_modelo(&client, salida.as_ref(), &model).await
+            }
         }
         Some(Commands::Doctor) => {
             doctor::ejecutar_doctor(
@@ -119,8 +124,16 @@ pub async fn ejecutar_cli(
             )
             .await
         }
-        Some(Commands::Discover { tag, limit }) => {
-            discover::discover_rooms(&client, salida.as_ref(), &tag, limit).await
+        Some(Commands::Discover { tag, limit, json }) => {
+            if json {
+                println!(
+                    "{}",
+                    discover::discover_rooms_json(&client, &tag, limit).await?
+                );
+                Ok(())
+            } else {
+                discover::discover_rooms(&client, salida.as_ref(), &tag, limit).await
+            }
         }
         Some(Commands::Watch {
             modelos,

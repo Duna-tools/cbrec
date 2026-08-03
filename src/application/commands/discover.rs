@@ -1,9 +1,17 @@
 //! Discovers public rooms by tag without changing account or recording state.
 
+use crate::infrastructure::external::DiscoveredRoom;
 use crate::infrastructure::ChaturbateClient;
 use crate::presentation::Output;
+use serde::Serialize;
 
 const MAX_RESULTS: usize = 50;
+
+#[derive(Serialize)]
+struct DiscoveryResult {
+    tag: String,
+    rooms: Vec<DiscoveredRoom>,
+}
 
 pub(crate) async fn discover_rooms(
     client: &ChaturbateClient,
@@ -11,22 +19,42 @@ pub(crate) async fn discover_rooms(
     raw_tag: &str,
     limit: usize,
 ) -> anyhow::Result<()> {
+    let result = find_rooms(client, raw_tag, limit).await?;
+    if result.rooms.is_empty() {
+        output.discovery_empty(&result.tag);
+        return Ok(());
+    }
+
+    output.discovery_started(&result.tag, result.rooms.len());
+    for room in result.rooms {
+        output.discovery_room(&room.username, room.viewers, &room.show, &room.subject);
+    }
+    Ok(())
+}
+
+/// Returns one compact JSON document for a tag discovery query.
+pub(crate) async fn discover_rooms_json(
+    client: &ChaturbateClient,
+    raw_tag: &str,
+    limit: usize,
+) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(
+        &find_rooms(client, raw_tag, limit).await?,
+    )?)
+}
+
+async fn find_rooms(
+    client: &ChaturbateClient,
+    raw_tag: &str,
+    limit: usize,
+) -> anyhow::Result<DiscoveryResult> {
     let tag = normalize_tag(raw_tag)?;
     if !(1..=MAX_RESULTS).contains(&limit) {
         anyhow::bail!("El limite debe estar entre 1 y {MAX_RESULTS}");
     }
 
     let rooms = client.discover_rooms_by_tag(&tag, limit).await?;
-    if rooms.is_empty() {
-        output.discovery_empty(&tag);
-        return Ok(());
-    }
-
-    output.discovery_started(&tag, rooms.len());
-    for room in rooms {
-        output.discovery_room(&room.username, room.viewers, &room.show, &room.subject);
-    }
-    Ok(())
+    Ok(DiscoveryResult { tag, rooms })
 }
 
 fn normalize_tag(raw_tag: &str) -> anyhow::Result<String> {
@@ -51,5 +79,23 @@ mod tests {
         assert_eq!(normalize_tag(" #Gaming ").unwrap(), "gaming");
         assert!(normalize_tag("bad tag").is_err());
         assert!(normalize_tag("\u{1b}[31m").is_err());
+    }
+
+    #[test]
+    fn discovery_json_has_tag_and_rooms() {
+        let result = DiscoveryResult {
+            tag: "gaming".to_string(),
+            rooms: vec![DiscoveredRoom {
+                username: "alice".to_string(),
+                subject: "hello".to_string(),
+                viewers: 42,
+                show: "public".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            r#"{"tag":"gaming","rooms":[{"username":"alice","subject":"hello","viewers":42,"show":"public"}]}"#
+        );
     }
 }

@@ -8,7 +8,7 @@ use quick_m3u8::config::ParsingOptionsBuilder;
 use quick_m3u8::tag::{hls, KnownTag};
 use quick_m3u8::{HlsLine, Reader};
 use reqwest::{Client, StatusCode};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use tokio::sync::watch;
@@ -78,7 +78,7 @@ struct RoomListEntry {
     current_show: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub(crate) struct DiscoveredRoom {
     pub(crate) username: String,
     pub(crate) subject: String,
