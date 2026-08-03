@@ -10,6 +10,10 @@ output_root = ~/Videos
 ; 250 MiB por defecto: 262144000
 min_file_size = 262144000
 
+; Espacio libre minimo antes y durante una grabacion.
+; 2 GiB por defecto; usa 0 para desactivar la proteccion.
+min_free_space = 2147483648
+
 [naming]
 ; Plantilla para nombres de archivo.
 ; Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}

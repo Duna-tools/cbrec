@@ -104,6 +104,7 @@ pub struct ChaturbateClient {
     cancel_rx: Option<watch::Receiver<bool>>,
     session_cookie: Option<String>,
     max_duration_secs: Option<u64>,
+    min_free_space: u64,
 }
 
 impl ChaturbateClient {
@@ -123,6 +124,7 @@ impl ChaturbateClient {
             cancel_rx: None,
             session_cookie: None,
             max_duration_secs: None,
+            min_free_space: 0,
         })
     }
 
@@ -143,6 +145,11 @@ impl ChaturbateClient {
 
     pub fn with_max_duration_secs(mut self, seconds: u64) -> Self {
         self.max_duration_secs = Some(seconds);
+        self
+    }
+
+    pub fn with_min_free_space(mut self, bytes: u64) -> Self {
+        self.min_free_space = bytes;
         self
     }
 
@@ -326,6 +333,7 @@ impl StreamRepository for ChaturbateClient {
             output_path,
             self.session_cookie.as_deref(),
             self.max_duration_secs,
+            self.min_free_space,
             self.cancel_rx.clone(),
         )
         .await

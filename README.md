@@ -217,6 +217,9 @@ output_root = ~/Videos
 # Archivos menores se mueven a /small. Debe ser mayor a 0.
 min_file_size = 262144000
 
+# Espacio libre minimo; 0 desactiva la proteccion.
+min_free_space = 2147483648
+
 [naming]
 # Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
 # Debe ser una ruta relativa y no puede contener ..

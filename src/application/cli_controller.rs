@@ -78,6 +78,7 @@ pub async fn ejecutar_cli(
     } else {
         client
     };
+    let client = client.with_min_free_space(config.min_free_space);
     let client = client.with_cancel_receiver(cancel_rx);
     let min_file_size = if duration.is_some() {
         None

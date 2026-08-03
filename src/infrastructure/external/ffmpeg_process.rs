@@ -15,6 +15,7 @@ use tokio::time::{Duration, Instant};
 const SHUTDOWN_GRACE_SECS: u64 = 15;
 const STALL_TIMEOUT_SECS: u64 = 120;
 const STALL_CHECK_SECS: u64 = 5;
+const DISK_CHECK_SECS: u64 = 30;
 
 pub(super) async fn run_ffmpeg(
     ffmpeg_path: &Path,
@@ -22,6 +23,7 @@ pub(super) async fn run_ffmpeg(
     output_path: &Path,
     session_cookie: Option<&str>,
     max_duration_secs: Option<u64>,
+    min_free_space: u64,
     cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<(), InfrastructureError> {
     if cancel_rx
@@ -30,6 +32,8 @@ pub(super) async fn run_ffmpeg(
     {
         return Err(InfrastructureError::RecordingCancelled);
     }
+
+    ensure_disk_space(output_path, min_free_space)?;
 
     let mut command = tokio::process::Command::new(ffmpeg_path);
     command.kill_on_drop(true);
@@ -97,6 +101,10 @@ pub(super) async fn run_ffmpeg(
                     STALL_TIMEOUT_SECS
                 )));
             }
+            available = wait_for_low_disk(output_path, min_free_space) => {
+                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                return Err(low_disk_error(available?, min_free_space));
+            }
         }
     } else {
         tokio::select! {
@@ -118,10 +126,49 @@ pub(super) async fn run_ffmpeg(
                     STALL_TIMEOUT_SECS
                 )));
             }
+            available = wait_for_low_disk(output_path, min_free_space) => {
+                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                return Err(low_disk_error(available?, min_free_space));
+            }
         }
     }
 
     Ok(())
+}
+
+fn ensure_disk_space(path: &Path, required: u64) -> Result<(), InfrastructureError> {
+    if required == 0 {
+        return Ok(());
+    }
+    let available = available_disk_space(path)?;
+    if available < required {
+        return Err(low_disk_error(available, required));
+    }
+    Ok(())
+}
+
+async fn wait_for_low_disk(path: &Path, required: u64) -> Result<u64, std::io::Error> {
+    if required == 0 {
+        return future::pending().await;
+    }
+
+    loop {
+        tokio::time::sleep(Duration::from_secs(DISK_CHECK_SECS)).await;
+        let available = available_disk_space(path)?;
+        if available < required {
+            return Ok(available);
+        }
+    }
+}
+
+fn available_disk_space(path: &Path) -> Result<u64, std::io::Error> {
+    fs4::available_space(path.parent().unwrap_or_else(|| Path::new(".")))
+}
+
+fn low_disk_error(available: u64, required: u64) -> InfrastructureError {
+    InfrastructureError::RecordingError(format!(
+        "espacio insuficiente: {available} bytes disponibles; se requieren {required}"
+    ))
 }
 
 async fn check_exit_status(
@@ -499,6 +546,7 @@ mod tests {
             &output,
             None,
             None,
+            0,
             None,
         )
         .await;
@@ -517,6 +565,7 @@ mod tests {
             &output,
             None,
             None,
+            0,
             None,
         )
         .await
@@ -539,6 +588,7 @@ mod tests {
             &output,
             None,
             None,
+            0,
             Some(cancel_rx),
         )
         .await;
@@ -561,6 +611,7 @@ mod tests {
             &output,
             None,
             None,
+            0,
             None,
         )
         .await
@@ -568,5 +619,27 @@ mod tests {
         .to_string();
 
         assert!(error.contains("Failed to start ffmpeg"));
+    }
+
+    #[tokio::test]
+    async fn insufficient_disk_space_prevents_process_start() {
+        let executable = std::env::temp_dir().join("cbrec_missing_ffmpeg_executable");
+        let output = executable.with_extension("mp4");
+
+        let error = run_ffmpeg(
+            &executable,
+            "https://example.com/live.m3u8",
+            &output,
+            None,
+            None,
+            u64::MAX,
+            None,
+        )
+        .await
+        .expect_err("low disk must fail before process start")
+        .to_string();
+
+        assert!(error.contains("espacio insuficiente"));
+        assert!(!error.contains("Failed to start ffmpeg"));
     }
 }
