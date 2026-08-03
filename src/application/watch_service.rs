@@ -1,6 +1,6 @@
 use crate::application::recording::{
     descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
-    ResultadoGrabacion,
+    write_recording_metadata, ResultadoGrabacion,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::repositories::StreamRepository;
@@ -199,6 +199,7 @@ where
                     }
                 });
 
+                let started_at = chrono::Utc::now();
                 let result = descargar_grabacion(
                     client_clone.as_ref(),
                     &stream_url,
@@ -208,6 +209,16 @@ where
                 )
                 .await;
                 detener_tarea_progreso(progress_task).await;
+
+                if let Ok(recording) = &result {
+                    if let Err(e) =
+                        write_recording_metadata(recording, &nombre_clone, quality, started_at)
+                            .await
+                    {
+                        salida_clone.error_fallo_grabacion(&nombre_clone, &e.to_string());
+                        return (nombre_clone, None, true);
+                    }
+                }
 
                 match result {
                     Ok(ResultadoGrabacion::Guardado(p)) => (nombre_clone, Some(p), false),

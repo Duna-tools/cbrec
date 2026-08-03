@@ -1,6 +1,13 @@
+//! Coordinates recording file finalization and its local metadata sidecar.
+//!
+//! This module owns output reservation, partial-file recovery, MP4 validation,
+//! and metadata persistence. It does not resolve streams or start FFmpeg.
+
 use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::{StreamUrl, VideoQuality};
 use crate::infrastructure::InfrastructureError;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
 use std::ffi::OsStr;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -11,6 +18,17 @@ pub(crate) enum ResultadoGrabacion {
     Guardado(PathBuf),
     Pequeno(PathBuf, u64),
     Cancelado,
+}
+
+#[derive(Serialize)]
+struct RecordingMetadata<'a> {
+    schema_version: u8,
+    model: &'a str,
+    requested_quality: String,
+    started_at: DateTime<Utc>,
+    finished_at: DateTime<Utc>,
+    file_size_bytes: u64,
+    classification: &'static str,
 }
 
 pub(crate) fn ruta_parcial(ruta: &Path) -> PathBuf {
@@ -113,6 +131,54 @@ where
     }
 }
 
+/// Writes the versioned JSON sidecar for a completed recording.
+pub(crate) async fn write_recording_metadata(
+    result: &ResultadoGrabacion,
+    model: &str,
+    quality: VideoQuality,
+    started_at: DateTime<Utc>,
+) -> Result<(), InfrastructureError> {
+    let (path, classification) = match result {
+        ResultadoGrabacion::Guardado(path) => (path, "saved"),
+        ResultadoGrabacion::Pequeno(path, _) => (path, "small"),
+        ResultadoGrabacion::Cancelado => return Ok(()),
+    };
+    let metadata = RecordingMetadata {
+        schema_version: 1,
+        model,
+        requested_quality: quality.to_string(),
+        started_at,
+        finished_at: Utc::now(),
+        file_size_bytes: tokio::fs::metadata(path).await?.len(),
+        classification,
+    };
+    let mut content = serde_json::to_vec_pretty(&metadata).map_err(|error| {
+        InfrastructureError::RecordingError(format!(
+            "no se pudieron serializar los metadatos: {error}"
+        ))
+    })?;
+    content.push(b'\n');
+
+    let destination = path_with_suffix(path, ".json");
+    let temporary = path_with_suffix(&destination, ".part");
+    if let Err(error) = tokio::fs::write(&temporary, content).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+    if let Err(error) = tokio::fs::rename(&temporary, &destination).await {
+        let _ = tokio::fs::remove_file(&temporary).await;
+        return Err(error.into());
+    }
+
+    Ok(())
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
 async fn probar_directorio_escribible(dir: &Path) -> Result<(), InfrastructureError> {
     let probe = dir.join(format!(".cbrec_write_test_{}", std::process::id()));
     let file = OpenOptions::new()
@@ -132,7 +198,12 @@ async fn probar_directorio_escribible(dir: &Path) -> Result<(), InfrastructureEr
 }
 
 async fn ruta_disponible(ruta: &Path) -> Result<bool, InfrastructureError> {
-    if existe(ruta).await? || existe(&ruta_parcial(ruta)).await? {
+    let metadata = path_with_suffix(ruta, ".json");
+    if existe(ruta).await?
+        || existe(&ruta_parcial(ruta)).await?
+        || existe(&metadata).await?
+        || existe(&path_with_suffix(&metadata, ".part")).await?
+    {
         return Ok(false);
     }
 
@@ -468,6 +539,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recording_path_does_not_overwrite_existing_metadata() {
+        let dir = ruta_temporal("preflight_metadata");
+        tokio::fs::create_dir_all(&dir).await.expect("crea dir");
+        let ruta = dir.join("alice.mp4");
+        tokio::fs::write(path_with_suffix(&ruta, ".json"), b"{}")
+            .await
+            .expect("crea metadata existente");
+
+        let preparada = preparar_ruta_grabacion(ruta)
+            .await
+            .expect("prepara ruta alternativa");
+
+        assert_eq!(preparada, dir.join("alice_001.mp4"));
+        assert!(ruta_parcial(&preparada).exists());
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
     async fn descargar_grabacion_devuelve_cancelado_si_repo_cancela() {
         let repo = RepoCancelado;
         let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
@@ -547,6 +636,41 @@ mod tests {
         assert_eq!(destino, ruta);
         assert!(destino.exists());
         let _ = tokio::fs::remove_file(destino).await;
+    }
+
+    #[tokio::test]
+    async fn recording_metadata_is_versioned_and_adjacent() {
+        let path = ruta_temporal("metadata");
+        tokio::fs::write(&path, b"video")
+            .await
+            .expect("crea grabacion");
+        let result = ResultadoGrabacion::Guardado(path.clone());
+        let started_at = "2026-08-02T12:00:00Z".parse().expect("fecha valida");
+
+        write_recording_metadata(&result, "alice", VideoQuality::P720, started_at)
+            .await
+            .expect("escribe metadatos");
+
+        let sidecar = path_with_suffix(&path, ".json");
+        let content = tokio::fs::read_to_string(&sidecar)
+            .await
+            .expect("lee metadatos");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&content).expect("metadatos validos");
+        assert_eq!(metadata["schema_version"], 1);
+        assert_eq!(metadata["model"], "alice");
+        assert_eq!(metadata["requested_quality"], "720p");
+        assert_eq!(metadata["started_at"], "2026-08-02T12:00:00Z");
+        assert_eq!(metadata["file_size_bytes"], 5);
+        assert_eq!(metadata["classification"], "saved");
+        assert!(metadata["finished_at"].as_str().is_some());
+        assert_eq!(
+            sidecar.file_name().unwrap().to_string_lossy(),
+            format!("{}.json", path.file_name().unwrap().to_string_lossy())
+        );
+
+        let _ = tokio::fs::remove_file(sidecar).await;
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
