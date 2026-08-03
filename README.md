@@ -99,6 +99,8 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec nombremodelo
 
 La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
 
+Cada grabación final crea un sidecar `archivo.mp4.json` con esquema v1, modelo, calidad solicitada, tiempos UTC, tamaño y clasificación. No almacena la URL del stream ni cookies.
+
 Puedes pasar nombres de modelo o URLs de Chaturbate; cbrec normaliza ambos al mismo nombre interno antes de grabar, monitorizar o guardar en la lista.
 
 #### Daemon de monitorización: `watch`
@@ -390,6 +392,8 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec modelname
 ```
 
 The default quality is `best`: cbrec resolves the highest available variant and records that direct URL. When `--duration` is used, the output is treated as an explicit clip and is not marked as a "small file" by the normal long-recording threshold.
+
+Each completed recording creates a `file.mp4.json` sidecar with schema v1, model, requested quality, UTC timestamps, size, and classification. Stream URLs and cookies are not stored.
 
 You can pass model names or Chaturbate URLs; cbrec normalizes both to the same internal model name before recording, watching, or saving to the list.
 

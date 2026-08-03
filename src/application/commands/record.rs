@@ -1,6 +1,6 @@
 use crate::application::recording::{
     descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
-    ResultadoGrabacion,
+    write_recording_metadata, ResultadoGrabacion,
 };
 use crate::application::utils::{normalizar_modelos, ParametrosGrabacion};
 use crate::domain::value_objects::{ModelName, VideoQuality};
@@ -206,8 +206,12 @@ async fn grabar_modelo(
         }
     });
 
+    let started_at = chrono::Utc::now();
     let result = descargar_grabacion(client, &stream_url, ruta, quality, min_file_size).await;
     detener_tarea_progreso(progress_task).await;
+    if let Ok(recording) = &result {
+        write_recording_metadata(recording, model_name.as_str(), quality, started_at).await?;
+    }
 
     match result {
         Ok(ResultadoGrabacion::Guardado(ruta)) => {
