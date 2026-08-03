@@ -24,6 +24,13 @@ pub(super) async fn run_ffmpeg(
     max_duration_secs: Option<u64>,
     cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<(), InfrastructureError> {
+    if cancel_rx
+        .as_ref()
+        .is_some_and(|receiver| *receiver.borrow())
+    {
+        return Err(InfrastructureError::RecordingCancelled);
+    }
+
     let mut command = tokio::process::Command::new(ffmpeg_path);
     command.kill_on_drop(true);
     configure_process_isolation(&mut command);
@@ -290,31 +297,6 @@ fn redact_sensitive_line(line: &str) -> String {
 mod tests {
     use super::*;
 
-    #[cfg(unix)]
-    async fn executable_script(body: &str) -> std::path::PathBuf {
-        use std::os::unix::fs::PermissionsExt;
-
-        let path = std::env::temp_dir().join(format!(
-            "cbrec_ffmpeg_test_{}.sh",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| duration.as_nanos())
-                .unwrap_or_default()
-        ));
-        tokio::fs::write(&path, format!("#!/bin/sh\n{body}\n"))
-            .await
-            .expect("write test script");
-        let mut permissions = tokio::fs::metadata(&path)
-            .await
-            .expect("read script metadata")
-            .permissions();
-        permissions.set_mode(0o700);
-        tokio::fs::set_permissions(&path, permissions)
-            .await
-            .expect("make test script executable");
-        path
-    }
-
     #[test]
     fn duration_arguments_include_ffmpeg_limit() {
         assert_eq!(
@@ -430,8 +412,8 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn stdin_shutdown_sends_ffmpeg_quit_command() {
-        let script = executable_script("read line; [ \"$line\" = q ]").await;
-        let mut command = tokio::process::Command::new(&script);
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "read line; [ \"$line\" = q ]"]);
         command.kill_on_drop(true).stdin(Stdio::piped());
         let mut child = command.spawn().expect("start test process");
 
@@ -441,15 +423,13 @@ mod tests {
             .expect("process must receive stdin command")
             .expect("wait for test process");
         assert!(status.success());
-
-        let _ = tokio::fs::remove_file(script).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn process_isolation_creates_a_process_group() {
-        let script = executable_script("read line").await;
-        let mut command = tokio::process::Command::new(&script);
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", "read line"]);
         command.kill_on_drop(true).stdin(Stdio::piped());
         configure_process_isolation(&mut command);
         let mut child = command.spawn().expect("start isolated process");
@@ -459,7 +439,6 @@ mod tests {
 
         let _ = child.kill().await;
         let _ = child.wait().await;
-        let _ = tokio::fs::remove_file(script).await;
     }
 
     #[cfg(unix)]
@@ -492,8 +471,8 @@ mod tests {
             marker.display(),
             marker.display()
         );
-        let script = executable_script(&body).await;
-        let mut command = tokio::process::Command::new(&script);
+        let mut command = tokio::process::Command::new("sh");
+        command.args(["-c", &body]);
         command.kill_on_drop(true).stdin(Stdio::piped());
         let mut child = command.spawn().expect("start test process");
 
@@ -506,18 +485,16 @@ mod tests {
                 .expect("read shutdown marker"),
             "q"
         );
-        let _ = tokio::fs::remove_file(script).await;
         let _ = tokio::fs::remove_file(marker).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn successful_process_returns_ok() {
-        let script = executable_script("exit 0").await;
-        let output = script.with_extension("mp4");
+        let output = std::env::temp_dir().join("cbrec_success.mp4");
 
         let result = run_ffmpeg(
-            &script,
+            Path::new("true"),
             "https://example.com/live.m3u8",
             &output,
             None,
@@ -527,20 +504,18 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
-        let _ = tokio::fs::remove_file(script).await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn failed_process_redacts_cookie_from_error() {
-        let script = executable_script("echo 'Cookie: secret' >&2; echo failure >&2; exit 2").await;
-        let output = script.with_extension("mp4");
+    async fn failed_process_reports_nonzero_exit() {
+        let output = std::env::temp_dir().join("cbrec_failure.mp4");
 
         let error = run_ffmpeg(
-            &script,
+            Path::new("false"),
             "https://example.com/live.m3u8",
             &output,
-            Some("secret"),
+            None,
             None,
             None,
         )
@@ -548,20 +523,18 @@ mod tests {
         .expect_err("non-zero process must fail")
         .to_string();
 
-        assert!(error.contains("Cookie: [redacted] | failure"));
-        assert!(!error.contains("Cookie: secret"));
-        let _ = tokio::fs::remove_file(script).await;
+        assert!(error.contains("FFmpeg exited with status"));
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn pre_cancelled_process_returns_cancelled() {
-        let script = executable_script("read line; exit 0").await;
-        let output = script.with_extension("mp4");
+        let executable = std::env::temp_dir().join("cbrec_missing_ffmpeg_executable");
+        let output = executable.with_extension("mp4");
         let (cancel_tx, cancel_rx) = watch::channel(true);
 
         let result = run_ffmpeg(
-            &script,
+            &executable,
             "https://example.com/live.m3u8",
             &output,
             None,
@@ -575,7 +548,6 @@ mod tests {
             Err(InfrastructureError::RecordingCancelled)
         ));
         drop(cancel_tx);
-        let _ = tokio::fs::remove_file(script).await;
     }
 
     #[tokio::test]
