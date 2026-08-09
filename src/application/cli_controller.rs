@@ -5,7 +5,9 @@ use crate::application::utils::{
 };
 use crate::application::watch_service::{self, ConsoleWatchPrompter, WatchParams};
 use crate::domain::value_objects::VideoQuality;
-use crate::infrastructure::{AppConfig, ChaturbateClient, ConfigWarning, WatchedModels};
+use crate::infrastructure::{
+    receive_browser_session, AppConfig, ChaturbateClient, ConfigWarning, WatchedModels,
+};
 use crate::presentation::{Cli, Commands, ConsoleOutput, Output};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -29,6 +31,7 @@ pub async fn ejecutar_cli(
         duration,
         ffmpeg_path,
         session_cookie: cookie_cli,
+        browser_session,
         quiet,
         verbose,
         command,
@@ -36,11 +39,16 @@ pub async fn ejecutar_cli(
     let salida: Arc<dyn Output> = Arc::new(ConsoleOutput::new(verbose, quiet));
     mostrar_config_warnings(salida.as_ref(), &config_warnings);
 
-    let session_cookie_final = resolver_session_cookie(
-        cookie_cli,
-        config.auth.session_cookie.clone(),
-        salida.as_ref(),
-    );
+    let session_cookie_final = if browser_session {
+        validar_comando_con_sesion(&command)?;
+        Some(receive_browser_session().await?)
+    } else {
+        resolver_session_cookie(
+            cookie_cli,
+            config.auth.session_cookie.clone(),
+            salida.as_ref(),
+        )
+    };
 
     if jobs == Some(0) {
         anyhow::bail!("El limite de concurrencia debe ser mayor a 0");
@@ -289,6 +297,19 @@ fn normalizar_cookie(cookie: Option<String>) -> Option<String> {
     })
 }
 
+fn validar_comando_con_sesion(command: &Option<Commands>) -> anyhow::Result<()> {
+    if matches!(
+        command,
+        None | Some(Commands::Record { .. } | Commands::Check { .. } | Commands::Watch { .. })
+    ) {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "--browser-session solo se puede usar con record, check, watch o grabación directa"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,5 +371,12 @@ mod tests {
 
         assert_eq!(cookie.0.as_deref(), Some("PHPSESSID=config"));
         assert!(!cookie.1);
+    }
+
+    #[test]
+    fn browser_session_rechaza_comandos_que_no_consumen_cookie() {
+        let result = validar_comando_con_sesion(&Some(Commands::Doctor));
+
+        assert!(result.is_err());
     }
 }

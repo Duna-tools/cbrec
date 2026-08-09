@@ -1,5 +1,5 @@
 use cbrec::presentation::{Cli, Commands};
-use clap::Parser;
+use clap::{error::ErrorKind, Parser};
 
 #[test]
 fn parse_multiple_models_default_jobs() {
@@ -21,6 +21,31 @@ fn parse_duration_override_main() {
     let cli = Cli::parse_from(["cbrec", "--duration", "20", "alice"]);
     assert_eq!(cli.modelos, vec!["alice"]);
     assert_eq!(cli.duration, Some(20));
+}
+
+#[test]
+fn parse_browser_session_flag() {
+    let cli = Cli::parse_from(["cbrec", "--browser-session", "watch", "alice"]);
+
+    assert!(cli.browser_session);
+}
+
+#[test]
+fn browser_session_conflicts_with_literal_session_cookie() {
+    let result = Cli::try_parse_from([
+        "cbrec",
+        "--browser-session",
+        "--session-cookie",
+        "PHPSESSID=abc",
+        "watch",
+        "alice",
+    ]);
+    let error = match result {
+        Ok(_) => panic!("las dos fuentes explícitas de sesión no deben coexistir"),
+        Err(error) => error,
+    };
+
+    assert_eq!(error.kind(), ErrorKind::ArgumentConflict);
 }
 
 #[test]
