@@ -27,6 +27,7 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 | Grabación directa | Sin configuración previa, arranca al instante |
 | Daemon `watch` | Monitoriza modelos y graba automáticamente al conectarse |
 | Autenticación | Soporte de cookie de sesión para rooms privados/fan-only |
+| Sesión desde navegador | Puente local y efímero para Violentmonkey |
 | Polling adaptativo | Intervalo corto con actividad, largo cuando todo está offline |
 | Modo confirmación | `--ask` para pedir permiso antes de grabar cada modelo |
 | Grabaciones paralelas | Hasta N modelos simultáneos configurable |
@@ -212,6 +213,32 @@ Cómo obtener la cookie:
 
 La cookie funciona para `watch`, `record` y `check`.
 
+#### Sesión temporal con Violentmonkey
+
+Para evitar copiar la cookie a la terminal, usa el userscript incluido en
+[`scripts/cbrec-violentmonkey.user.js`](scripts/cbrec-violentmonkey.user.js).
+
+1. Crea un userscript nuevo en Violentmonkey y pega el contenido del archivo.
+2. Ejecuta el comando que necesite la sesión:
+
+```bash
+cbrec --browser-session watch alice
+```
+
+3. En la pestaña de Chaturbate con la sesión deseada, abre el menú de
+   Violentmonkey, selecciona `Enviar sesión a cbrec` y pega la dirección que
+   muestra la terminal.
+
+El receptor está limitado a `127.0.0.1`, acepta una sola sesión durante dos
+minutos y la mantiene únicamente para esa ejecución de cbrec. No modifica
+`config.toml` ni escribe la cookie en logs, argumentos o archivos.
+
+Con varios navegadores, perfiles o ventanas privadas, ejecuta el userscript
+desde la pestaña que contiene la sesión que quieres usar. Para cookies
+`HttpOnly`, Violentmonkey 2.35.1 o posterior debe tener habilitado ese permiso
+globalmente y para el script; además, la extensión debe estar permitida en modo
+incógnito o privado cuando corresponda.
+
 ### Configuración
 
 Archivo: `~/.config/cbrec/config.toml`
@@ -328,6 +355,7 @@ En Windows, el instalador `.msi` y el paquete `portable.zip` incluyen `ffmpeg.ex
 | Direct recording | No setup required, starts immediately |
 | `watch` daemon | Monitors models and records automatically when they go online |
 | Authentication | Session cookie support for private/fan-only rooms |
+| Browser session | Ephemeral local bridge for Violentmonkey |
 | Adaptive polling | Short interval when activity exists, longer interval when everything is offline |
 | Confirmation mode | `--ask` asks before recording each model |
 | Parallel recordings | Configurable limit for simultaneous recordings |
@@ -509,6 +537,31 @@ How to get the cookie:
 4. Copy the values for `PHPSESSID` and `chaturbatesid`.
 
 The cookie works for `watch`, `record`, and `check`.
+
+#### Temporary session with Violentmonkey
+
+To avoid copying a cookie into the terminal, use the bundled
+[`scripts/cbrec-violentmonkey.user.js`](scripts/cbrec-violentmonkey.user.js).
+
+1. Create a new userscript in Violentmonkey and paste the file contents.
+2. Run the command that needs the session:
+
+```bash
+cbrec --browser-session watch alice
+```
+
+3. In the Chaturbate tab containing the desired session, open the
+   Violentmonkey menu, choose `Enviar sesión a cbrec`, and paste the address
+   shown by the terminal.
+
+The receiver is limited to `127.0.0.1`, accepts one session for two minutes,
+and keeps it only for that cbrec process. It does not modify `config.toml` or
+write the cookie to logs, arguments, or files.
+
+With multiple browsers, profiles, or private windows, run the userscript from
+the tab that contains the session to use. For `HttpOnly` cookies, Violentmonkey
+2.35.1 or later must enable that permission globally and for the script; the
+extension must also be allowed in incognito or private mode when applicable.
 
 ### Configuration
 

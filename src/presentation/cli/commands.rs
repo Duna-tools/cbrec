@@ -42,6 +42,10 @@ pub struct Cli {
     #[arg(long, global = true, value_name = "COOKIE")]
     pub session_cookie: Option<String>,
 
+    /// Recibe una cookie desde el userscript de Violentmonkey para esta ejecución.
+    #[arg(long, global = true, conflicts_with = "session_cookie")]
+    pub browser_session: bool,
+
     /// Suprime output informativo. Solo muestra errores y resultados finales.
     #[arg(long, global = true, conflicts_with = "verbose")]
     pub quiet: bool,
