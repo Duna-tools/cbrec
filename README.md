@@ -20,6 +20,25 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 
 **cbrec** permite grabar streams de Chaturbate de forma sencilla. Proporciona el nombre del modelo y comienza a grabar inmediatamente. Con el comando `watch` puedes monitorizar varios modelos en segundo plano y grabar automáticamente cuando se conecten.
 
+### Inicio rápido
+
+1. Instala un binario desde [Releases](https://github.com/Duna-tools/cbrec/releases) o compila el proyecto.
+2. Comprueba el entorno:
+
+```bash
+cbrec doctor
+```
+
+3. Graba un modelo:
+
+```bash
+cbrec nombremodelo
+```
+
+Usa `cbrec --help` para ver todas las opciones. Las grabaciones se guardan bajo
+`cb_rec/<modelo>` dentro del directorio de vídeos del sistema, salvo que indiques
+`--output`.
+
 ### Características
 
 | Característica | Descripción |
@@ -34,8 +53,8 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 | Clips cortos | `--duration SECS` para grabaciones temporizadas |
 | FFmpeg flexible | PATH, `--ffmpeg-path`, `CBREC_FFMPEG` o paquete Windows con FFmpeg incluido |
 | Shutdown limpio | Ctrl+C detiene grabaciones activas correctamente |
-| Bajo consumo | ~3-5 MB RAM en reposo, 0% CPU durmiendo entre ciclos |
-| DDD/Onion | Arquitectura modular y extensible |
+| Salida estructurada | `--json` para `check` y `discover`; metadatos junto a cada grabación |
+| Interfaz opcional | Explorador terminal por tag con `cbrec tui --tag <tag>` |
 
 ### Instalación
 
@@ -61,7 +80,7 @@ makepkg -si
 
 #### Compilar desde fuentes
 
-Requisitos: Rust 1.70+ y FFmpeg disponible.
+Requisitos: Rust estable y FFmpeg disponible.
 
 ```bash
 git clone https://github.com/Duna-tools/cbrec.git
@@ -180,9 +199,9 @@ cbrec watch --help
 
 ### Autenticación
 
-Para acceder a rooms privados o fan-only, o para reducir bloqueos durante el polling, puedes usar una cookie de sesión.
+Para acceder a rooms privados o fan-only, o para reducir bloqueos durante el polling, puedes usar una cookie de sesión. Para una sola ejecución, prefiere la sesión temporal de Violentmonkey: evita exponer la cookie en el shell y no la guarda en disco.
 
-Opción recomendada, archivo de configuración:
+Opción persistente, archivo de configuración:
 
 ```toml
 # ~/.config/cbrec/config.toml
@@ -247,7 +266,7 @@ Archivo: `~/.config/cbrec/config.toml`
 [general]
 # Directorio base donde se guardan las grabaciones.
 # Se crea cb_rec/<modelo> dentro de esta ruta.
-output_root = ~/Videos
+output_root = "~/Videos"
 
 # Tamaño mínimo de archivo en bytes.
 # Archivos menores se mueven a /small. Debe ser mayor a 0.
@@ -259,7 +278,7 @@ min_free_space = 2147483648
 [naming]
 # Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
 # Debe ser una ruta relativa y no puede contener ..
-template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+template = "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
 
 [watch]
 # Todos los intervalos deben ser mayores a 0.
@@ -273,34 +292,39 @@ max_simultaneous = 3
 # session_cookie = "PHPSESSID=abc123; chaturbatesid=xyz"
 ```
 
-### Arquitectura
+### Arquitectura por responsabilidades
 
-El proyecto sigue una arquitectura Onion/DDD con separación clara de responsabilidades:
+El código se organiza para separar reglas, orquestación, adaptadores y la interfaz
+de terminal. No es necesario conocer esta estructura para usar el programa.
 
 ```text
 src/
-├── domain/                  # Lógica de negocio pura
-│   ├── value_objects/       # ModelName, StreamUrl, VideoQuality, EstadoModelo
-│   ├── repositories/        # Traits
-│   └── errors.rs            # Errores de dominio
-├── infrastructure/          # Implementaciones concretas
-│   ├── external/            # ChaturbateClient
-│   └── config/              # AppConfig
-├── application/             # Casos de uso
-│   ├── cli_controller.rs
-│   └── watch_service.rs
-└── presentation/            # CLI y salida en consola
-    ├── cli/commands.rs
-    └── output.rs
+├── domain/                  # Tipos validados y contratos
+├── application/             # Grabación, watch y comandos
+├── infrastructure/          # Chaturbate, FFmpeg, configuración y sesión local
+└── presentation/            # CLI, salida y TUI opcional
 ```
 
 ### Desarrollo
 
 ```bash
-cargo build
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test
 cargo build --release
-RUST_LOG=debug ./target/debug/cbrec nombremodelo
+```
+
+El CI ejecuta además las pruebas en Linux, macOS y Windows, auditoría de
+dependencias y cobertura en Linux.
+
+#### Publicar una release
+
+Las pruebas se ejecutan en cada push. El empaquetado y la publicación se
+activan con un tag `v*`; el tag debe coincidir con la versión de `Cargo.toml`.
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 ### Troubleshooting
@@ -324,7 +348,8 @@ El cliente reintenta automáticamente con backoff exponencial. Si persiste, veri
 
 **Bloqueo de Cloudflare en modo `watch`**
 
-Configura una `session_cookie` válida para reducir la probabilidad de bloqueo.
+Una sesión válida puede ser necesaria para rooms privados o fan-only. Para una
+sesión temporal, prefiere `--browser-session` con Violentmonkey.
 
 **FFmpeg no encontrado**
 
@@ -348,6 +373,24 @@ En Windows, el instalador `.msi` y el paquete `portable.zip` incluyen `ffmpeg.ex
 
 **cbrec** records Chaturbate streams from the command line. Pass one or more model names and recording starts immediately. With `watch`, cbrec can monitor models in the background and automatically start recording when they go online.
 
+### Quick start
+
+1. Install a binary from [Releases](https://github.com/Duna-tools/cbrec/releases) or build the project.
+2. Check the environment:
+
+```bash
+cbrec doctor
+```
+
+3. Record a model:
+
+```bash
+cbrec modelname
+```
+
+Use `cbrec --help` to see all options. Recordings are stored under
+`cb_rec/<model>` inside the system video directory unless `--output` is used.
+
 ### Features
 
 | Feature | Description |
@@ -362,8 +405,8 @@ En Windows, el instalador `.msi` y el paquete `portable.zip` incluyen `ffmpeg.ex
 | Short clips | `--duration SECS` for timed recordings |
 | Flexible FFmpeg | PATH, `--ffmpeg-path`, `CBREC_FFMPEG`, or Windows package with FFmpeg included |
 | Clean shutdown | Ctrl+C stops active recordings properly |
-| Low resource usage | ~3-5 MB RAM while idle, 0% CPU while sleeping between cycles |
-| DDD/Onion | Modular and extensible architecture |
+| Structured output | `--json` for `check` and `discover`; metadata beside every recording |
+| Optional interface | Terminal tag browser with `cbrec tui --tag <tag>` |
 
 ### Installation
 
@@ -389,7 +432,7 @@ makepkg -si
 
 #### Build from source
 
-Requirements: Rust 1.70+ and FFmpeg available.
+Requirements: stable Rust and FFmpeg available.
 
 ```bash
 git clone https://github.com/Duna-tools/cbrec.git
@@ -505,9 +548,9 @@ cbrec watch --help
 
 ### Authentication
 
-Use a session cookie to access private or fan-only rooms, or to reduce polling blocks.
+Use a session cookie to access private or fan-only rooms, or to reduce polling blocks. For a single run, prefer the temporary Violentmonkey session: it avoids exposing the cookie in the shell and does not store it on disk.
 
-Recommended option, configuration file:
+Persistent option, configuration file:
 
 ```toml
 # ~/.config/cbrec/config.toml
@@ -571,16 +614,19 @@ File: `~/.config/cbrec/config.toml`
 [general]
 # Base directory where recordings are stored.
 # cb_rec/<model> is created inside this path.
-output_root = ~/Videos
+output_root = "~/Videos"
 
 # Minimum file size in bytes.
 # Smaller files are moved to /small. Must be greater than 0.
 min_file_size = 262144000
 
+# Minimum free disk space; 0 disables the safeguard.
+min_free_space = 2147483648
+
 [naming]
 # Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
 # Must be a relative path and cannot contain ..
-template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+template = "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
 
 [watch]
 # All intervals must be greater than 0.
@@ -594,34 +640,39 @@ max_simultaneous = 3
 # session_cookie = "PHPSESSID=abc123; chaturbatesid=xyz"
 ```
 
-### Architecture
+### Architecture by responsibility
 
-The project follows an Onion/DDD architecture with clear responsibility boundaries:
+The code separates validated types, orchestration, adapters, and the terminal
+interface. This structure is not required to use the program.
 
 ```text
 src/
-├── domain/                  # Pure business logic
-│   ├── value_objects/       # ModelName, StreamUrl, VideoQuality, EstadoModelo
-│   ├── repositories/        # Traits
-│   └── errors.rs            # Domain errors
-├── infrastructure/          # Concrete implementations
-│   ├── external/            # ChaturbateClient
-│   └── config/              # AppConfig
-├── application/             # Use-case orchestration
-│   ├── cli_controller.rs
-│   └── watch_service.rs
-└── presentation/            # CLI and console output
-    ├── cli/commands.rs
-    └── output.rs
+├── domain/                  # Validated types and contracts
+├── application/             # Recording, watch, and commands
+├── infrastructure/          # Chaturbate, FFmpeg, configuration, and local session
+└── presentation/            # CLI, output, and optional TUI
 ```
 
 ### Development
 
 ```bash
-cargo build
+cargo fmt --check
+cargo clippy --locked --all-targets -- -D warnings
 cargo test
 cargo build --release
-RUST_LOG=debug ./target/debug/cbrec modelname
+```
+
+CI also runs tests on Linux, macOS, and Windows, dependency auditing, and Linux
+coverage checks.
+
+#### Publish a release
+
+Tests run on every push. Packaging and publishing are triggered by a `v*` tag;
+the tag must match the version in `Cargo.toml`.
+
+```bash
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 ### Troubleshooting
@@ -645,7 +696,8 @@ The client retries automatically with exponential backoff. If it persists, check
 
 **Cloudflare block in `watch` mode**
 
-Configure a valid `session_cookie` to reduce the probability of blocks.
+A valid session can be required for private or fan-only rooms. For a temporary
+session, prefer `--browser-session` with Violentmonkey.
 
 **FFmpeg not found**
 
