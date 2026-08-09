@@ -148,24 +148,40 @@ fn version_ffmpeg(salida: &[u8]) -> Option<String> {
     Some(version)
 }
 
-/// Extrae el nombre de usuario de una URL de Chaturbate o devuelve el input sin cambios.
-pub(crate) fn extraer_nombre(input: &str) -> String {
-    if input.starts_with("http") {
-        url::Url::parse(input)
-            .ok()
-            .and_then(|u| {
-                u.path_segments()?
-                    .find(|s| !s.is_empty())
-                    .map(str::to_owned)
-            })
-            .unwrap_or_else(|| input.to_owned())
-    } else {
-        input.to_owned()
+fn is_chaturbate_host(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+    host == "chaturbate.com" || host.ends_with(".chaturbate.com")
+}
+
+fn extract_model_name(input: &str) -> Result<String, DomainError> {
+    let input = input.trim();
+    let is_http_url = input.split_once("://").is_some_and(|(scheme, _)| {
+        matches!(scheme.to_ascii_lowercase().as_str(), "http" | "https")
+    });
+    if !is_http_url {
+        return Ok(input.to_owned());
     }
+
+    let url = url::Url::parse(input).map_err(|_| {
+        DomainError::InvalidModelName("Model URL has an invalid format".to_string())
+    })?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| DomainError::InvalidModelName("Model URL must have a host".to_string()))?;
+    if !is_chaturbate_host(host) {
+        return Err(DomainError::InvalidModelName(
+            "Model URL must use chaturbate.com".to_string(),
+        ));
+    }
+
+    url.path_segments()
+        .and_then(|mut segments| segments.find(|segment| !segment.is_empty()))
+        .map(str::to_owned)
+        .ok_or_else(|| DomainError::InvalidModelName("Model URL has no model name".to_string()))
 }
 
 pub(crate) fn normalizar_modelo(input: &str) -> Result<ModelName, DomainError> {
-    let nombre = extraer_nombre(input);
+    let nombre = extract_model_name(input)?;
     ModelName::try_from(nombre.as_str())
 }
 
@@ -194,7 +210,7 @@ mod tests {
 
     #[test]
     fn extraer_nombre_acepta_url_de_chaturbate() {
-        let nombre = extraer_nombre("https://chaturbate.com/_sofy_smith_/");
+        let nombre = extract_model_name("https://chaturbate.com/_sofy_smith_/").unwrap();
 
         assert_eq!(nombre, "_sofy_smith_");
     }
@@ -202,6 +218,13 @@ mod tests {
     #[test]
     fn normalizar_modelo_acepta_url_y_lowercase() {
         let nombre = normalizar_modelo("https://chaturbate.com/Alice_123/").unwrap();
+
+        assert_eq!(nombre.as_str(), "alice_123");
+    }
+
+    #[test]
+    fn normalizar_modelo_acepta_subdominio_de_chaturbate() {
+        let nombre = normalizar_modelo("HTTPS://en.chaturbate.com/Alice_123/").unwrap();
 
         assert_eq!(nombre.as_str(), "alice_123");
     }
@@ -223,6 +246,20 @@ mod tests {
     #[test]
     fn normalizar_modelo_rechaza_url_sin_modelo_valido() {
         let resultado = normalizar_modelo("https://chaturbate.com/");
+
+        assert!(resultado.is_err());
+    }
+
+    #[test]
+    fn normalizar_modelo_rechaza_url_de_otro_dominio() {
+        let resultado = normalizar_modelo("https://example.com/alice/");
+
+        assert!(resultado.is_err());
+    }
+
+    #[test]
+    fn normalizar_modelo_rechaza_dominio_parecido() {
+        let resultado = normalizar_modelo("https://notchaturbate.com/alice/");
 
         assert!(resultado.is_err());
     }
