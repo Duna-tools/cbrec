@@ -48,6 +48,30 @@ pub(crate) async fn ejecutar_watch(params: WatchParams) -> anyhow::Result<()> {
     ejecutar_watch_con_repo(params).await
 }
 
+fn handle_recording_completion(
+    result: Result<(String, Option<PathBuf>, bool), tokio::task::JoinError>,
+    states: &mut HashMap<String, EstadoModelo>,
+    blocked_until: &mut HashMap<String, Instant>,
+    failure_cooldown: Duration,
+    output: &dyn Output,
+) {
+    let (model, final_path, failed) = match result {
+        Ok(completion) => completion,
+        Err(error) => {
+            output.error_tarea_abortada(&error.to_string());
+            return;
+        }
+    };
+
+    if let Some(path) = final_path {
+        output.watch_fin_grabacion(&model, &path);
+    }
+    if failed {
+        blocked_until.insert(model.clone(), instante_tras(failure_cooldown));
+    }
+    states.insert(model, EstadoModelo::Offline);
+}
+
 async fn ejecutar_watch_con_repo<R>(params: WatchParams<R>) -> anyhow::Result<()>
 where
     R: StreamRepository<Error = InfrastructureError> + 'static,
@@ -86,17 +110,14 @@ where
         .unwrap_or_else(Instant::now);
 
     loop {
-        while let Some(Ok((modelo, ruta_final, hubo_error))) = grabaciones.try_join_next() {
-            if let Some(ruta) = ruta_final {
-                salida.watch_fin_grabacion(&modelo, &ruta);
-            }
-            if hubo_error {
-                bloqueados_hasta.insert(
-                    modelo.clone(),
-                    instante_tras(Duration::from_secs(config.watch.cooldown_tras_fallo_secs)),
-                );
-            }
-            estados.insert(modelo, EstadoModelo::Offline);
+        while let Some(result) = grabaciones.try_join_next() {
+            handle_recording_completion(
+                result,
+                &mut estados,
+                &mut bloqueados_hasta,
+                Duration::from_secs(config.watch.cooldown_tras_fallo_secs),
+                salida.as_ref(),
+            );
         }
 
         if *cancel_rx.borrow() {
@@ -242,12 +263,27 @@ where
 
         salida.watch_proximo_check(intervalo_secs);
 
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(intervalo_secs)) => {}
-            _ = esperar_cancelacion(cancel_rx.clone()) => {
-                salida.watch_deteniendo();
-                cancelar_grabaciones(&mut grabaciones).await;
-                break;
+        let poll_delay = tokio::time::sleep(Duration::from_secs(intervalo_secs));
+        tokio::pin!(poll_delay);
+        loop {
+            tokio::select! {
+                _ = &mut poll_delay => break,
+                completed = grabaciones.join_next(), if !grabaciones.is_empty() => {
+                    if let Some(result) = completed {
+                        handle_recording_completion(
+                            result,
+                            &mut estados,
+                            &mut bloqueados_hasta,
+                            Duration::from_secs(config.watch.cooldown_tras_fallo_secs),
+                            salida.as_ref(),
+                        );
+                    }
+                }
+                _ = esperar_cancelacion(cancel_rx.clone()) => {
+                    salida.watch_deteniendo();
+                    cancelar_grabaciones(&mut grabaciones).await;
+                    return Ok(());
+                }
             }
         }
     }
@@ -579,23 +615,29 @@ mod tests {
         let repo = Arc::new(RepoFake::online());
         let salida = Arc::new(OutputFake::new(cancel_tx));
         let salida_trait: Arc<dyn Output> = salida.clone();
-        let config = config_test();
+        let mut config = config_test();
+        config.watch.poll_interval_secs = 3_600;
+        config.watch.poll_interval_idle_secs = 3_600;
         let output_root = config.output_root.clone();
 
-        ejecutar_watch_con_repo(WatchParams {
-            client: Arc::clone(&repo),
-            config: Arc::new(config),
-            modelos: vec![modelo("alice")],
-            ask: false,
-            raiz_salida: None,
-            quality: VideoQuality::Best,
-            limite_concurrencia: 1,
-            min_file_size: Some(1),
-            cancel_rx,
-            salida: salida_trait,
-            prompter: Arc::new(PrompterFake::new(true)),
-        })
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            ejecutar_watch_con_repo(WatchParams {
+                client: Arc::clone(&repo),
+                config: Arc::new(config),
+                modelos: vec![modelo("alice")],
+                ask: false,
+                raiz_salida: None,
+                quality: VideoQuality::Best,
+                limite_concurrencia: 1,
+                min_file_size: Some(1),
+                cancel_rx,
+                salida: salida_trait,
+                prompter: Arc::new(PrompterFake::new(true)),
+            }),
+        )
         .await
+        .expect("recording completion must wake watch before the poll deadline")
         .unwrap();
 
         let eventos = salida.eventos();

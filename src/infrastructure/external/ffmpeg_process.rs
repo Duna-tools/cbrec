@@ -16,6 +16,26 @@ const SHUTDOWN_GRACE_SECS: u64 = 15;
 const STALL_TIMEOUT_SECS: u64 = 120;
 const STALL_CHECK_SECS: u64 = 5;
 const DISK_CHECK_SECS: u64 = 30;
+const MAX_FFMPEG_STDERR_BYTES: usize = 64 * 1024;
+
+async fn read_bounded_stderr<R>(reader: &mut R) -> Vec<u8>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut retained = Vec::with_capacity(MAX_FFMPEG_STDERR_BYTES);
+    let mut chunk = [0_u8; 8 * 1024];
+
+    loop {
+        let read = match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(read) => read,
+        };
+        let remaining = MAX_FFMPEG_STDERR_BYTES.saturating_sub(retained.len());
+        retained.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+
+    retained
+}
 
 pub(super) async fn run_ffmpeg(
     ffmpeg_path: &Path,
@@ -64,13 +84,10 @@ pub(super) async fn run_ffmpeg(
         .map_err(|e| {
             InfrastructureError::RecordingError(format!("Failed to start ffmpeg: {}", e))
         })?;
-    let mut stderr_task = child.stderr.take().map(|mut stderr| {
-        tokio::spawn(async move {
-            let mut buffer = Vec::new();
-            let _ = stderr.read_to_end(&mut buffer).await;
-            buffer
-        })
-    });
+    let mut stderr_task = child
+        .stderr
+        .take()
+        .map(|mut stderr| tokio::spawn(async move { read_bounded_stderr(&mut stderr).await }));
 
     if let Some(mut cancel_rx) = cancel_rx {
         if *cancel_rx.borrow() {
@@ -382,6 +399,21 @@ mod tests {
         let truncated = summarize_stderr(above_limit.as_bytes()).unwrap();
         assert_eq!(truncated.chars().count(), 1203);
         assert!(truncated.ends_with("..."));
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_drains_input_but_keeps_a_bounded_prefix() {
+        let input = vec![b'x'; MAX_FFMPEG_STDERR_BYTES * 3];
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let writer_task = tokio::spawn(async move {
+            writer.write_all(&input).await.expect("write stderr data");
+        });
+
+        let captured = read_bounded_stderr(&mut reader).await;
+        writer_task.await.expect("stderr writer completes");
+
+        assert_eq!(captured.len(), MAX_FFMPEG_STDERR_BYTES);
+        assert!(captured.iter().all(|byte| *byte == b'x'));
     }
 
     #[tokio::test]

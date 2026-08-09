@@ -64,13 +64,15 @@ Descarga el binario para tu plataforma desde la [página de releases](https://gi
 
 | Plataforma | Archivo |
 |---|---|
-| Linux x86_64 | `cbrec_linux_amd64.tar.gz` |
-| Linux x86_64 (Debian/Ubuntu) | `cbrec_*.deb` |
-| Linux x86_64 (Fedora/RHEL) | `cbrec_*.rpm` |
+| Linux x86_64 | `cbrec-linux-x86_64` |
+| Linux x86_64 (Debian/Ubuntu) | `cbrec-linux-x86_64.deb` |
+| Linux x86_64 (Fedora/RHEL) | `cbrec-linux-x86_64.rpm` |
 | Linux (Arch) | `PKGBUILD` |
-| macOS x86_64 | `cbrec_macos_x86_64.tar.gz` |
-| macOS Apple Silicon | `cbrec_macos_aarch64.tar.gz` |
-| Windows x86_64 | `cbrec_*.msi`, `cbrec_*_portable.zip` o `cbrec.exe` |
+| macOS x86_64 | `cbrec-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `cbrec-macos-aarch64.tar.gz` |
+| Windows x86_64 | `cbrec-windows-x86_64.msi`, `cbrec-windows-x86_64-portable.zip` o `cbrec-windows-x86_64.exe` |
+
+La tabla refleja el pipeline actual. La release `v0.0.2` es anterior a parte de estos paquetes; todos estarán disponibles a partir de la siguiente release etiquetada.
 
 Para Arch Linux:
 
@@ -416,13 +418,15 @@ Download the binary for your platform from the [releases page](https://github.co
 
 | Platform | File |
 |---|---|
-| Linux x86_64 | `cbrec_linux_amd64.tar.gz` |
-| Linux x86_64 (Debian/Ubuntu) | `cbrec_*.deb` |
-| Linux x86_64 (Fedora/RHEL) | `cbrec_*.rpm` |
+| Linux x86_64 | `cbrec-linux-x86_64` |
+| Linux x86_64 (Debian/Ubuntu) | `cbrec-linux-x86_64.deb` |
+| Linux x86_64 (Fedora/RHEL) | `cbrec-linux-x86_64.rpm` |
 | Linux (Arch) | `PKGBUILD` |
-| macOS x86_64 | `cbrec_macos_x86_64.tar.gz` |
-| macOS Apple Silicon | `cbrec_macos_aarch64.tar.gz` |
-| Windows x86_64 | `cbrec_*.msi`, `cbrec_*_portable.zip`, or `cbrec.exe` |
+| macOS x86_64 | `cbrec-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `cbrec-macos-aarch64.tar.gz` |
+| Windows x86_64 | `cbrec-windows-x86_64.msi`, `cbrec-windows-x86_64-portable.zip`, or `cbrec-windows-x86_64.exe` |
+
+The table reflects the current pipeline. Release `v0.0.2` predates some of these packages; all will be available starting with the next tagged release.
 
 For Arch Linux:
 

@@ -60,6 +60,17 @@ jobs:
           tar -xzf "${tool_dir}/${archive}" -C "${tool_dir}" actionlint
           "${tool_dir}/actionlint" -color
 
+      - name: Check release artifact contract (ubuntu only)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t prefixes < <(sed -n 's/^[[:space:]]*dist_prefix: //p' .github/workflows/ci.yml)
+          test "${#prefixes[@]}" -gt 0
+          for prefix in "${prefixes[@]}"; do
+            grep -Fq "$prefix" README.md
+          done
+
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:

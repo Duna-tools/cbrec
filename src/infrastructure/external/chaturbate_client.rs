@@ -19,6 +19,7 @@ const HTTP_TIMEOUT_SECS: u64 = 10;
 const HTTP_RETRY_BASE_MS: u64 = 200;
 const HTTP_RETRY_MAX_INTERVAL_SECS: u64 = 2;
 const HTTP_RETRY_MAX_ELAPSED_SECS: u64 = 10;
+const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 enum RetryFailure<E> {
     Transient(E),
@@ -27,6 +28,43 @@ enum RetryFailure<E> {
 
 fn retry_budget_exceeded(elapsed: Duration, delay: Duration, max_elapsed: Duration) -> bool {
     elapsed.saturating_add(delay) > max_elapsed
+}
+
+fn response_body_too_large() -> InfrastructureError {
+    InfrastructureError::ExternalService(format!(
+        "La respuesta HTTP excede el limite de {} bytes",
+        MAX_RESPONSE_BODY_BYTES
+    ))
+}
+
+fn append_body_chunk(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), InfrastructureError> {
+    if chunk.len() > MAX_RESPONSE_BODY_BYTES.saturating_sub(body.len()) {
+        return Err(response_body_too_large());
+    }
+    body.extend_from_slice(chunk);
+    Ok(())
+}
+
+async fn read_limited_text(mut response: reqwest::Response) -> Result<String, InfrastructureError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_RESPONSE_BODY_BYTES as u64)
+    {
+        return Err(response_body_too_large());
+    }
+
+    let capacity = response
+        .content_length()
+        .unwrap_or_default()
+        .min(MAX_RESPONSE_BODY_BYTES as u64) as usize;
+    let mut body = Vec::with_capacity(capacity);
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        InfrastructureError::ExternalService(format!("Failed to read response: {error}"))
+    })? {
+        append_body_chunk(&mut body, &chunk)?;
+    }
+
+    Ok(String::from_utf8_lossy(&body).into_owned())
 }
 
 /// Retries transient HTTP failures with bounded deterministic exponential delays.
@@ -206,12 +244,9 @@ impl ChaturbateClient {
                 }
             }
 
-            let contenido = response.text().await.map_err(|e| {
-                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
-                    "Failed to read response: {}",
-                    e
-                )))
-            })?;
+            let contenido = read_limited_text(response)
+                .await
+                .map_err(RetryFailure::Permanent)?;
 
             Ok(clasificar_chat_video_context(&contenido))
         })
@@ -252,11 +287,9 @@ impl ChaturbateClient {
                 }
             }
 
-            let content = response.text().await.map_err(|error| {
-                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
-                    "Failed to read response: {error}"
-                )))
-            })?;
+            let content = read_limited_text(response)
+                .await
+                .map_err(RetryFailure::Permanent)?;
             let response: RoomListResponse = serde_json::from_str(&content).map_err(|error| {
                 RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
                     "Invalid room list response: {error}"
@@ -412,12 +445,9 @@ impl ChaturbateClient {
                 }
             }
 
-            response.text().await.map_err(|e| {
-                RetryFailure::Permanent(InfrastructureError::ExternalService(format!(
-                    "Failed to read playlist: {}",
-                    e
-                )))
-            })
+            read_limited_text(response)
+                .await
+                .map_err(RetryFailure::Permanent)
         })
         .await
     }
@@ -817,6 +847,53 @@ hi.m3u8
 
         assert_eq!(result, Err("stop"));
         assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn response_body_rejects_bytes_over_limit() {
+        let mut body = Vec::new();
+        append_body_chunk(&mut body, &vec![b'x'; MAX_RESPONSE_BODY_BYTES])
+            .expect("the exact limit is accepted");
+
+        let error = append_body_chunk(&mut body, b"y").expect_err("one extra byte is rejected");
+
+        assert_eq!(body.len(), MAX_RESPONSE_BODY_BYTES);
+        assert!(error.to_string().contains("excede el limite"));
+    }
+
+    #[tokio::test]
+    async fn response_body_rejects_declared_oversize_before_reading() {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => return,
+            Err(error) => panic!("bind test server: {error}"),
+        };
+        let address = listener.local_addr().expect("test server address");
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let mut request = [0_u8; 1024];
+            let _ = socket.read(&mut request).await.expect("read request");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                MAX_RESPONSE_BODY_BYTES + 1
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response headers");
+        });
+        let response = reqwest::Client::new()
+            .get(format!("http://{address}"))
+            .send()
+            .await
+            .expect("request test server");
+
+        let error = read_limited_text(response)
+            .await
+            .expect_err("declared oversized body must fail");
+
+        assert!(error.to_string().contains("excede el limite"));
+        server.await.expect("test server completes");
     }
 
     #[test]
