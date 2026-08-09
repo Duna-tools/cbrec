@@ -20,6 +20,10 @@ struct OpcionesGrabacionModelo<'a> {
     modo_detallado: bool,
 }
 
+fn model_queue_capacity(model_count: usize) -> usize {
+    model_count.max(1)
+}
+
 pub(crate) async fn grabar_modelos(
     client: ChaturbateClient,
     config: AppConfig,
@@ -48,12 +52,12 @@ pub(crate) async fn grabar_modelos(
         salida.advertir_modelos_sobre_limite(modelos.len(), limite_concurrencia);
     }
 
-    let (tx, rx) = mpsc::channel::<String>(limite_concurrencia.saturating_mul(2).max(1));
+    let (tx, rx) = mpsc::channel::<ModelName>(model_queue_capacity(modelos.len()));
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
     let mut tareas = JoinSet::new();
 
     for modelo in modelos {
-        if tx.send(modelo.as_str().to_string()).await.is_err() {
+        if tx.send(modelo).await.is_err() {
             break;
         }
     }
@@ -102,8 +106,8 @@ pub(crate) async fn grabar_modelos(
                 .await;
 
                 if let Err(err) = resultado {
-                    salida.error_fallo_grabacion(&modelo, &err.to_string());
-                    errores.push(modelo);
+                    salida.error_fallo_grabacion(modelo.as_str(), &err.to_string());
+                    errores.push(modelo.as_str().to_string());
                 }
             }
             errores
@@ -131,7 +135,7 @@ pub(crate) async fn grabar_modelos(
 async fn grabar_modelo(
     client: &ChaturbateClient,
     config: &AppConfig,
-    target: &str,
+    model_name: &ModelName,
     opciones: OpcionesGrabacionModelo<'_>,
     salida: Arc<dyn Output>,
 ) -> anyhow::Result<()> {
@@ -143,18 +147,16 @@ async fn grabar_modelo(
     } = opciones;
 
     if modo_detallado {
-        salida.mostrar_inicio_detallado(target, &quality.to_string());
+        salida.mostrar_inicio_detallado(model_name.as_str(), &quality.to_string());
     } else {
-        salida.mostrar_inicio_resumido(target, &quality.to_string());
+        salida.mostrar_inicio_resumido(model_name.as_str(), &quality.to_string());
     }
-
-    let model_name = ModelName::try_from(target)?;
 
     if modo_detallado {
         salida.mostrar_verificando_disponibilidad();
     }
 
-    let stream_url = match client.consultar_estado(&model_name).await? {
+    let stream_url = match client.consultar_estado(model_name).await? {
         EstadoStream::Online { stream_url } => stream_url,
         EstadoStream::Offline => {
             if modo_detallado {
@@ -195,7 +197,7 @@ async fn grabar_modelo(
 
     let parcial = ruta_parcial(&ruta);
     let salida_p = Arc::clone(&salida);
-    let nombre_p = target.to_string();
+    let nombre_p = model_name.as_str().to_string();
     let parcial_p = parcial.clone();
     let progress_task = tokio::spawn(async move {
         loop {
@@ -218,21 +220,21 @@ async fn grabar_modelo(
             if modo_detallado {
                 salida.mostrar_archivo_guardado_detallado(&ruta);
             } else {
-                salida.mostrar_archivo_guardado_resumido(target, &ruta);
+                salida.mostrar_archivo_guardado_resumido(model_name.as_str(), &ruta);
             }
         }
         Ok(ResultadoGrabacion::Pequeno(ruta, bytes)) => {
             if modo_detallado {
                 salida.mostrar_archivo_pequeno_detallado(bytes, &ruta);
             } else {
-                salida.mostrar_archivo_pequeno_resumido(target, &ruta);
+                salida.mostrar_archivo_pequeno_resumido(model_name.as_str(), &ruta);
             }
         }
         Ok(ResultadoGrabacion::Cancelado) => {
             if modo_detallado {
                 salida.mostrar_cancelacion_detallada();
             } else {
-                salida.mostrar_cancelacion_resumida(target);
+                salida.mostrar_cancelacion_resumida(model_name.as_str());
             }
         }
         Err(e) => return Err(e.into()),
@@ -267,5 +269,30 @@ mod tests {
         .await;
 
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn queue_accepts_all_models_before_workers_start() {
+        let models = [
+            "alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf",
+        ]
+        .into_iter()
+        .map(|name| ModelName::try_from(name).expect("valid model name"))
+        .collect::<Vec<_>>();
+        let (sender, mut receiver) = mpsc::channel::<ModelName>(model_queue_capacity(models.len()));
+
+        for model in models {
+            tokio::time::timeout(Duration::from_millis(50), sender.send(model))
+                .await
+                .expect("the complete finite input must fit before workers start")
+                .expect("the receiver remains open");
+        }
+        drop(sender);
+
+        let mut received = 0;
+        while receiver.recv().await.is_some() {
+            received += 1;
+        }
+        assert_eq!(received, 7);
     }
 }
