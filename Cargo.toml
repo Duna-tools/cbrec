@@ -17,7 +17,7 @@ maintainer = "Lucas <lucas@users.noreply.github.com>"
 tokio = { version = "1.35", features = ["full"] }
 
 # HTTP Client
-reqwest = { version = "0.12", default-features = false, features = ["json", "cookies", "gzip", "stream", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "gzip", "stream", "rustls-tls"] }
 url = "2.5"
 colored = "2"
 

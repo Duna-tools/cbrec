@@ -30,6 +30,7 @@ config.local.toml
 
 # Tools / AI
 codedb.snapshot
+.serena/
 .claude/settings.local.json
 .cursor/
 .continue/
