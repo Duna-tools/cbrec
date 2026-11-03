@@ -150,7 +150,10 @@ impl Default for AppConfig {
 }
 
 fn config_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "cbrec").map(|p| p.config_dir().to_path_buf())
+    std::env::var_os("CBREC_CONFIG_DIR")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| ProjectDirs::from("", "", "cbrec").map(|p| p.config_dir().to_path_buf()))
 }
 
 impl AppConfig {
@@ -179,7 +182,7 @@ impl AppConfig {
                     if let Err(e) = config.aplicar_toml(&contenido) {
                         warnings.push(ConfigWarning::ConfigInvalida {
                             path: ruta_config,
-                            error: e.to_string(),
+                            error: config_error_location(&contenido, &e),
                         });
                     } else {
                         warnings.extend(config.normalizar_valores());
@@ -281,6 +284,13 @@ impl AppConfig {
                     valor: "<vacia>".to_string(),
                     reemplazo: "<sin cookie>".to_string(),
                     motivo: "no puede estar vacia",
+                });
+            } else if cookie.bytes().any(|b| b.is_ascii_control()) {
+                warnings.push(ConfigWarning::ValorAjustado {
+                    campo: "auth.session_cookie",
+                    valor: "<invalida>".to_string(),
+                    reemplazo: "<sin cookie>".to_string(),
+                    motivo: "no puede contener caracteres de control ni saltos de linea",
                 });
             } else {
                 self.auth.session_cookie = Some(cookie);
@@ -404,8 +414,20 @@ impl WatchedModels {
     }
 
     fn load_from_path(path: &Path) -> LoadedWatchedModels {
-        let Ok(contenido) = fs::read_to_string(path) else {
-            return LoadedWatchedModels::default();
+        let contenido = match fs::read_to_string(path) {
+            Ok(content) => content,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return LoadedWatchedModels::default()
+            }
+            Err(error) => {
+                return LoadedWatchedModels {
+                    watched: Self::default(),
+                    warnings: vec![ConfigWarning::ConfigNoLeida {
+                        path: path.to_path_buf(),
+                        error: error.to_string(),
+                    }],
+                }
+            }
         };
         match toml::from_str::<WatchedModels>(&contenido) {
             Ok(models) => LoadedWatchedModels {
@@ -414,7 +436,10 @@ impl WatchedModels {
             },
             Err(e) => LoadedWatchedModels {
                 watched: Self::default(),
-                warnings: vec![respaldar_watched_invalido(path, &e.to_string())],
+                warnings: vec![respaldar_watched_invalido(
+                    path,
+                    &config_error_location(&contenido, &e),
+                )],
             },
         }
     }
@@ -452,6 +477,15 @@ impl WatchedModels {
             watched: mut models,
             warnings,
         } = Self::load_from_path(path);
+        if let Some(warning) = warnings.iter().find(|warning| {
+            matches!(
+                warning,
+                ConfigWarning::ConfigNoLeida { .. }
+                    | ConfigWarning::WatchedInvalidoSinRespaldo { .. }
+            )
+        }) {
+            return Err(std::io::Error::other(warning.to_string()));
+        }
         let (resultado, cambio) = mutador(&mut models);
         if cambio {
             models.save_to_path(path)?;
@@ -740,9 +774,32 @@ fn template_inseguro(template: &str) -> bool {
         || template.starts_with('\\')
 }
 
+fn config_error_location(content: &str, error: &toml::de::Error) -> String {
+    // El mensaje original puede incluir cookies y otros valores del archivo.
+    let offset = error.span().map_or(0, |span| span.start).min(content.len());
+    let prefix = &content.as_bytes()[..offset];
+    let line = prefix.iter().filter(|&&byte| byte == b'\n').count() + 1;
+    let column = prefix
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte != b'\n')
+        .count()
+        + 1;
+    format!("sintaxis o tipo TOML invalido en linea {line}, columna {column}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shipped_config_example_is_valid() {
+        let mut config = AppConfig::default();
+        config
+            .aplicar_toml(include_str!("../../../config/config.toml.example"))
+            .unwrap();
+        assert!(config.normalizar_valores().is_empty());
+    }
 
     #[test]
     fn watch_config_defaults_son_razonables() {
@@ -1086,6 +1143,28 @@ session_cookie = "  PHPSESSID=abc  "
         let _ = fs::remove_file(backup_path);
     }
 
+    #[test]
+    fn app_config_normaliza_session_cookie_con_crlf() {
+        let mut cfg = AppConfig::default();
+        cfg.aplicar_toml(
+            r#"
+[auth]
+session_cookie = "PHPSESSID=abc\r\nInjected: header"
+"#,
+        )
+        .expect("toml valido");
+
+        let warnings = cfg.normalizar_valores();
+        assert!(cfg.auth.session_cookie.is_none());
+        assert!(warnings.iter().any(|w| matches!(
+            w,
+            ConfigWarning::ValorAjustado {
+                campo: "auth.session_cookie",
+                ..
+            }
+        )));
+    }
+
     fn ruta_temporal(nombre: &str) -> PathBuf {
         let nombre = nombre.replace('.', "_");
         let nanos = std::time::SystemTime::now()
@@ -1093,5 +1172,54 @@ session_cookie = "  PHPSESSID=abc  "
             .map(|d| d.as_nanos())
             .unwrap_or_default();
         std::env::temp_dir().join(format!("cbrec_config_test_{}_{}", nombre, nanos))
+    }
+
+    #[test]
+    fn watchlist_read_error_does_not_invoke_mutator() {
+        let root = ruta_temporal("read_error");
+        let path = root.join("watched.toml");
+        fs::create_dir_all(&path).unwrap();
+        let result = WatchedModels::update_in_path(&path, |_| -> ((), bool) {
+            panic!("no debe modificarse una lista ilegible")
+        });
+        assert!(result.is_err());
+        assert!(path.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_watchlist_updates_keep_both_entries() {
+        let root = ruta_temporal("concurrent_updates");
+        let path = root.join("watched.toml");
+        std::thread::scope(|scope| {
+            for name in ["alice", "bob"] {
+                let path = &path;
+                scope.spawn(move || {
+                    WatchedModels::update_in_path(path, |models| ((), models.add(name))).unwrap()
+                });
+            }
+        });
+        let result = WatchedModels::load_from_path(&path);
+        assert_eq!(result.watched.models.len(), 2);
+        assert!(result.watched.models.iter().any(|model| model == "alice"));
+        assert!(result.watched.models.iter().any(|model| model == "bob"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn watchlist_backup_failure_preserves_invalid_original() {
+        let root = ruta_temporal("backup_failure");
+        fs::create_dir_all(&root).unwrap();
+        // El respaldo supera NAME_MAX; el original y su lock siguen teniendo nombres válidos.
+        let path = root.join(format!("{}.toml", "w".repeat(220)));
+        let original = b"models = [";
+        fs::write(&path, original).unwrap();
+        let result = WatchedModels::update_in_path(&path, |_| -> ((), bool) {
+            panic!("no debe modificarse una lista sin respaldo");
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(path).unwrap(), original);
+        fs::remove_dir_all(root).unwrap();
     }
 }

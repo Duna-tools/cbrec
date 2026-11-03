@@ -98,10 +98,10 @@ pub enum Commands {
         json: bool,
     },
 
-    /// Explora modelos por tag en una interfaz interactiva.
+    /// Abre el inicio interactivo o explora un tag.
     Tui {
-        /// Tag a buscar, con o sin `#`.
-        #[arg(long)]
+        /// Tag inicial, con o sin `#`; omitir para abrir Inicio.
+        #[arg(long, default_value = "")]
         tag: String,
         /// Numero maximo de resultados (1-50).
         #[arg(long, default_value_t = 20)]

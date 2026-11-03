@@ -39,17 +39,6 @@ pub async fn ejecutar_cli(
     let salida: Arc<dyn Output> = Arc::new(ConsoleOutput::new(verbose, quiet));
     mostrar_config_warnings(salida.as_ref(), &config_warnings);
 
-    let session_cookie_final = if browser_session {
-        validar_comando_con_sesion(&command)?;
-        Some(receive_browser_session().await?)
-    } else {
-        resolver_session_cookie(
-            cookie_cli,
-            config.auth.session_cookie.clone(),
-            salida.as_ref(),
-        )
-    };
-
     if jobs == Some(0) {
         anyhow::bail!("El limite de concurrencia debe ser mayor a 0");
     }
@@ -61,6 +50,72 @@ pub async fn ejecutar_cli(
             salida.advertir_limite_concurrencia(LIMITE_CONCURRENCIA_DEFECTO, jobs);
         }
     }
+
+    match &command {
+        Some(
+            Commands::Record {
+                modelos, quality, ..
+            }
+            | Commands::Watch {
+                modelos, quality, ..
+            },
+        ) => {
+            normalizar_modelos(modelos.clone())?;
+            VideoQuality::from_str(quality).map_err(anyhow::Error::msg)?;
+        }
+        Some(Commands::Tui { tag, limit }) => {
+            if !tag.is_empty() {
+                discover::normalize_tag(tag)?;
+            }
+            anyhow::ensure!(
+                (1..=50).contains(limit),
+                "El límite debe estar entre 1 y 50"
+            );
+            VideoQuality::from_str(&calidad_principal).map_err(anyhow::Error::msg)?;
+        }
+        Some(Commands::Check { model, .. }) => {
+            crate::application::utils::normalizar_modelo(model)?;
+        }
+        None => {
+            if modelos_principales.is_empty() {
+                salida.mostrar_error_sin_modelo();
+                anyhow::bail!("sin modelo");
+            }
+            normalizar_modelos(modelos_principales.clone())?;
+            if !listar && !verificar {
+                VideoQuality::from_str(&calidad_principal).map_err(anyhow::Error::msg)?;
+            }
+        }
+        _ => {}
+    }
+
+    let saved_models = match &command {
+        Some(Commands::Watch { modelos, .. }) if modelos.is_empty() => {
+            let loaded = WatchedModels::load_with_warnings();
+            mostrar_config_warnings(salida.as_ref(), &loaded.warnings);
+            if loaded.watched.models.is_empty() {
+                anyhow::bail!(
+                    "Sin modelos. Usa 'cbrec add <modelo>' o especifica modelos en el comando."
+                );
+            }
+            normalizar_modelos(loaded.watched.models.clone())?;
+            Some(loaded.watched.models)
+        }
+        _ => None,
+    };
+
+    let session_cookie_final = if browser_session {
+        validar_comando_con_sesion(&command)?;
+        Some(receive_browser_session().await?)
+    } else {
+        resolver_session_cookie(
+            cookie_cli,
+            config.auth.session_cookie.clone(),
+            salida.as_ref(),
+        )
+    };
+
+    config.auth.session_cookie = session_cookie_final.clone();
 
     let ruta_ffmpeg_cli = resolver_ruta_opcional(ffmpeg_path);
     let ffmpeg_env_explicito = std::env::var(FFMPEG_ENV)
@@ -101,7 +156,7 @@ pub async fn ejecutar_cli(
             quality,
         }) => {
             let limite_concurrencia = jobs.unwrap_or(LIMITE_CONCURRENCIA_DEFECTO);
-            validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito).await?;
+            validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito, cancel_rx_worker.clone()).await?;
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
             let parametros = ParametrosGrabacion {
@@ -129,6 +184,7 @@ pub async fn ejecutar_cli(
                 ffmpeg_explicito,
                 resolver_ruta_opcional(salida_principal.clone()),
                 salida.as_ref(),
+                cancel_rx_worker.clone(),
             )
             .await
         }
@@ -143,7 +199,25 @@ pub async fn ejecutar_cli(
                 discover::discover_rooms(&client, salida.as_ref(), &tag, limit).await
             }
         }
-        Some(Commands::Tui { tag, limit }) => tui::run(&client, &tag, limit).await,
+        Some(Commands::Tui { tag, limit }) => {
+            tui::run(
+                tui::TuiParams {
+                    client,
+                    config,
+                    ffmpeg_path: ruta_ffmpeg,
+                    ffmpeg_explicit: ffmpeg_explicito,
+                    output_root: resolver_ruta_opcional(salida_principal),
+                    max_recordings: jobs.unwrap_or(LIMITE_CONCURRENCIA_DEFECTO),
+                    min_file_size,
+                    initial_quality: VideoQuality::from_str(&calidad_principal)
+                        .map_err(anyhow::Error::msg)?,
+                    cancel_rx: cancel_rx_worker,
+                },
+                &tag,
+                limit,
+            )
+            .await
+        }
         Some(Commands::Watch {
             modelos,
             ask,
@@ -159,14 +233,7 @@ pub async fn ejecutar_cli(
 
             let modelos_desde_cli = !modelos.is_empty();
             let nombres: Vec<String> = if modelos.is_empty() {
-                let watched = WatchedModels::load_with_warnings();
-                mostrar_config_warnings(salida.as_ref(), &watched.warnings);
-                if watched.watched.models.is_empty() {
-                    anyhow::bail!(
-                        "Sin modelos. Usa 'cbrec add <modelo>' o especifica modelos en el comando."
-                    );
-                }
-                watched.watched.models
+                saved_models.ok_or_else(|| anyhow::anyhow!("Sin lista de modelos validada"))?
             } else {
                 modelos
             };
@@ -193,7 +260,7 @@ pub async fn ejecutar_cli(
             let v_quality = VideoQuality::from_str(&quality).map_err(|e| anyhow::anyhow!(e))?;
             let raiz_salida = resolver_ruta_opcional(output);
 
-            validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito).await?;
+            validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito, cancel_rx_worker.clone()).await?;
             let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
 
             watch_service::ejecutar_watch(WatchParams {
@@ -207,7 +274,7 @@ pub async fn ejecutar_cli(
                 min_file_size,
                 cancel_rx: cancel_rx_worker,
                 salida,
-                prompter: Arc::new(ConsoleWatchPrompter),
+                prompter: Arc::new(ConsoleWatchPrompter::default()),
             })
             .await
         }
@@ -220,14 +287,14 @@ pub async fn ejecutar_cli(
             }
 
             let limite_concurrencia = jobs.unwrap_or(LIMITE_CONCURRENCIA_DEFECTO);
-            validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito).await?;
-            let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
 
             if listar {
                 list::listar_calidades_modelos(&client, salida.as_ref(), modelos_principales).await
             } else if verificar {
                 check::verificar_modelos(&client, salida.as_ref(), modelos_principales).await
             } else {
+                validar_ffmpeg(&ruta_ffmpeg, ffmpeg_explicito, cancel_rx_worker.clone()).await?;
+                let client = aplicar_ffmpeg_path(client, ruta_ffmpeg);
                 let v_quality =
                     VideoQuality::from_str(&calidad_principal).map_err(|e| anyhow::anyhow!(e))?;
                 let parametros = ParametrosGrabacion {
@@ -289,7 +356,7 @@ fn resolver_session_cookie_desde(
 fn normalizar_cookie(cookie: Option<String>) -> Option<String> {
     cookie.and_then(|v| {
         let v = v.trim().to_string();
-        if v.is_empty() {
+        if v.is_empty() || v.bytes().any(|b| b.is_ascii_control()) {
             None
         } else {
             Some(v)
@@ -300,13 +367,18 @@ fn normalizar_cookie(cookie: Option<String>) -> Option<String> {
 fn validar_comando_con_sesion(command: &Option<Commands>) -> anyhow::Result<()> {
     if matches!(
         command,
-        None | Some(Commands::Record { .. } | Commands::Check { .. } | Commands::Watch { .. })
+        None | Some(
+            Commands::Record { .. }
+                | Commands::Check { .. }
+                | Commands::Watch { .. }
+                | Commands::Tui { .. }
+        )
     ) {
         return Ok(());
     }
 
     anyhow::bail!(
-        "--browser-session solo se puede usar con record, check, watch o grabación directa"
+        "--browser-session solo se puede usar con record, check, watch, tui o grabación directa"
     )
 }
 
@@ -374,9 +446,31 @@ mod tests {
     }
 
     #[test]
+    fn resolver_session_cookie_devuelve_cookie_cli_normalizada() {
+        let cookie = resolver_session_cookie(
+            Some(" PHPSESSID=cli ".to_string()),
+            None,
+            &ConsoleOutput::default(),
+        );
+
+        assert_eq!(cookie.as_deref(), Some("PHPSESSID=cli"));
+    }
+
+    #[test]
     fn browser_session_rechaza_comandos_que_no_consumen_cookie() {
         let result = validar_comando_con_sesion(&Some(Commands::Doctor));
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolver_session_cookie_rechaza_crlf_y_controles() {
+        let cookie = resolver_session_cookie(
+            Some("PHPSESSID=abc\r\nInjected-Header: evil".to_string()),
+            None,
+            &ConsoleOutput::default(),
+        );
+
+        assert_eq!(cookie, None);
     }
 }

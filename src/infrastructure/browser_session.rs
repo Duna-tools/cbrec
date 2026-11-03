@@ -15,7 +15,7 @@ const MAX_HEADER_BYTES: usize = 4_096;
 const MAX_BODY_BYTES: usize = 8_192;
 const MAX_INVALID_REQUESTS: usize = 3;
 const SESSION_PATH_PREFIX: &str = "/cbrec-session/";
-const ALLOWED_COOKIE_NAMES: [&str; 2] = ["PHPSESSID", "chaturbatesid"];
+const ALLOWED_COOKIE_NAMES: [&str; 3] = ["sessionid", "PHPSESSID", "chaturbatesid"];
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -28,6 +28,23 @@ struct BrowserSessionPayload {
 /// La dirección mostrada contiene un código de un solo uso y solo acepta
 /// conexiones a `127.0.0.1`. La cookie resultante no se escribe en disco.
 pub async fn receive_browser_session() -> anyhow::Result<String> {
+    let cookie = receive_browser_session_with_prompt(|url| {
+        eprintln!("Abre Chaturbate y ejecuta «Enviar sesión a cbrec» en Violentmonkey.");
+        eprintln!("Pega esta dirección en el diálogo del userscript:");
+        eprintln!("{url}");
+        eprintln!(
+            "La recepción caduca en {} segundos.",
+            RECEIVE_TIMEOUT.as_secs()
+        );
+    })
+    .await?;
+    eprintln!("Sesión recibida para esta ejecución; no se guardó en disco.");
+    Ok(cookie)
+}
+
+pub(crate) async fn receive_browser_session_with_prompt(
+    prompt: impl FnOnce(&str),
+) -> anyhow::Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .context("No se pudo abrir el receptor local de sesión")?;
@@ -37,15 +54,16 @@ pub async fn receive_browser_session() -> anyhow::Result<String> {
     let code = generate_code()?;
     let path = format!("{SESSION_PATH_PREFIX}{code}");
 
-    eprintln!("Abre Chaturbate y ejecuta «Enviar sesión a cbrec» en Violentmonkey.");
-    eprintln!("Pega esta dirección en el diálogo del userscript:");
-    eprintln!("http://127.0.0.1:{}{}", address.port(), path);
-    eprintln!(
-        "La recepción caduca en {} segundos.",
-        RECEIVE_TIMEOUT.as_secs()
-    );
+    prompt(&format!("http://127.0.0.1:{}{}", address.port(), path));
 
-    let deadline = Instant::now() + RECEIVE_TIMEOUT;
+    receive_session(listener, &path, Instant::now() + RECEIVE_TIMEOUT).await
+}
+
+async fn receive_session(
+    listener: TcpListener,
+    path: &str,
+    deadline: Instant,
+) -> anyhow::Result<String> {
     let mut invalid_requests = 0;
 
     loop {
@@ -59,17 +77,33 @@ pub async fn receive_browser_session() -> anyhow::Result<String> {
             .map_err(|_| anyhow!("Se agotó el tiempo para recibir la sesión del navegador"))?
             .context("No se pudo aceptar la conexión local")?;
 
-        match timeout(CONNECTION_TIMEOUT, receive_request(&mut stream, &path)).await {
+        match tokio::time::timeout_at(
+            deadline.min(Instant::now() + CONNECTION_TIMEOUT),
+            receive_request(&mut stream, path),
+        )
+        .await
+        {
             Ok(Ok(cookie)) => {
-                let _ = write_response(&mut stream, "204 No Content").await;
-                eprintln!("Sesión recibida para esta ejecución; no se guardó en disco.");
+                let _ = tokio::time::timeout_at(
+                    deadline,
+                    write_response(&mut stream, "204 No Content"),
+                )
+                .await;
                 return Ok(cookie);
             }
             Ok(Err(_)) => {
-                let _ = write_response(&mut stream, "400 Bad Request").await;
+                let _ = tokio::time::timeout_at(
+                    deadline,
+                    write_response(&mut stream, "400 Bad Request"),
+                )
+                .await;
             }
             Err(_) => {
-                let _ = write_response(&mut stream, "408 Request Timeout").await;
+                let _ = tokio::time::timeout_at(
+                    deadline,
+                    write_response(&mut stream, "408 Request Timeout"),
+                )
+                .await;
             }
         }
 
@@ -109,6 +143,10 @@ async fn read_request(stream: &mut TcpStream) -> anyhow::Result<Vec<u8>> {
             continue;
         };
 
+        ensure!(
+            header_end <= MAX_HEADER_BYTES,
+            "Los encabezados exceden el límite"
+        );
         let content_length = content_length(&request[..header_end])?;
         ensure!(
             content_length <= MAX_BODY_BYTES,
@@ -167,6 +205,14 @@ fn header_end(request: &[u8]) -> Option<usize> {
 fn content_length(header_bytes: &[u8]) -> anyhow::Result<usize> {
     let header =
         std::str::from_utf8(header_bytes).context("Los encabezados HTTP no son texto válido")?;
+    ensure!(
+        !header
+            .split("\r\n")
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .any(|(name, _)| name.eq_ignore_ascii_case("transfer-encoding")),
+        "Transfer-Encoding no está permitido"
+    );
     let mut lengths = header
         .split("\r\n")
         .skip(1)
@@ -194,6 +240,7 @@ fn normalize_session_cookie(cookie: &str) -> anyhow::Result<String> {
             ALLOWED_COOKIE_NAMES.contains(&name),
             "La cookie no está permitida"
         );
+        ensure!(!value.is_empty(), "El valor de la cookie está vacío");
         ensure!(
             value
                 .bytes()
@@ -237,11 +284,14 @@ mod tests {
 
     #[test]
     fn parse_session_request_accepts_only_allowed_cookie_names() {
-        let body = r#"{"session_cookie":"PHPSESSID=abc; chaturbatesid=xyz"}"#;
+        let body = r#"{"session_cookie":"sessionid=current; PHPSESSID=abc; chaturbatesid=xyz"}"#;
         let result =
             parse_session_request(&request("/cbrec-session/code", body), "/cbrec-session/code");
 
-        assert_eq!(result.unwrap(), "PHPSESSID=abc; chaturbatesid=xyz");
+        assert_eq!(
+            result.unwrap(),
+            "sessionid=current; PHPSESSID=abc; chaturbatesid=xyz"
+        );
     }
 
     #[test]
@@ -262,5 +312,173 @@ mod tests {
         );
 
         assert!(result.is_err());
+    }
+    #[tokio::test]
+    async fn receiver_rejects_large_headers_even_with_complete_body() {
+        let body = r#"{"session_cookie":"sessionid=abc"}"#;
+        let raw = format!(
+            "POST /code HTTP/1.1\r\nX-Padding: {}\r\nContent-Length: {}\r\n\r\n{body}",
+            "x".repeat(MAX_HEADER_BYTES),
+            body.len()
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        sender.write_all(raw.as_bytes()).await.unwrap();
+        sender.shutdown().await.unwrap();
+        let (mut stream, _) = listener.accept().await.unwrap();
+        assert!(receive_request(&mut stream, "/code").await.is_err());
+    }
+
+    #[test]
+    fn session_rejects_empty_cookie_values() {
+        assert!(normalize_session_cookie("sessionid=").is_err());
+    }
+
+    #[test]
+    fn session_rejects_ambiguous_http_framing() {
+        let raw = b"Content-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let header = [b"POST /code HTTP/1.1\r\n".as_slice(), raw].concat();
+        assert!(content_length(&header).is_err());
+    }
+    #[tokio::test]
+    async fn receiver_recovers_after_wrong_code_and_accepts_session_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(receive_session(
+            listener,
+            "/code",
+            Instant::now() + Duration::from_secs(2),
+        ));
+        for (path, expected) in [("/wrong", "400 Bad Request"), ("/code", "204 No Content")] {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            let raw = request(path, r#"{"session_cookie":"sessionid=abc"}"#);
+            for chunk in raw.chunks(7) {
+                stream.write_all(chunk).await.unwrap();
+                tokio::task::yield_now().await;
+            }
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with(&format!("HTTP/1.1 {expected}")));
+        }
+        assert_eq!(receiver.await.unwrap().unwrap(), "sessionid=abc");
+        assert!(TcpStream::connect(address).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn receiver_bounds_invalid_attempts_and_total_wait() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(receive_session(
+            listener,
+            "/code",
+            Instant::now() + Duration::from_secs(2),
+        ));
+        for _ in 0..MAX_INVALID_REQUESTS {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            stream.write_all(&request("/wrong", "{}")).await.unwrap();
+            let mut response = Vec::new();
+            stream.read_to_end(&mut response).await.unwrap();
+            assert!(response.starts_with(b"HTTP/1.1 400"));
+        }
+        assert!(receiver
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string()
+            .contains("demasiadas"));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _stalled = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let result = timeout(
+            Duration::from_secs(1),
+            receive_session(
+                listener,
+                "/code",
+                Instant::now() + Duration::from_millis(30),
+            ),
+        )
+        .await;
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn session_parser_rejects_malformed_and_conflicting_input() {
+        for cookie in [
+            "",
+            "sessionid",
+            "tracking=abc",
+            "sessionid=a; sessionid=b",
+            "sessionid=a b",
+            "sessionid=a\r\nInjected:x",
+        ] {
+            assert!(normalize_session_cookie(cookie).is_err(), "{cookie:?}");
+        }
+        for header in [
+            b"POST / HTTP/1.1\r\n\r\n".as_slice(),
+            b"POST / HTTP/1.1\r\nContent-Length: x\r\n\r\n",
+            b"POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 1\r\n\r\n",
+            b"\xff",
+        ] {
+            assert!(content_length(header).is_err());
+        }
+        for body in [
+            r#"{"session_cookie":"sessionid=abc","extra":1}"#,
+            "{",
+            r#"{"session_cookie":42}"#,
+        ] {
+            assert!(parse_session_request(&request("/code", body), "/code").is_err());
+        }
+        let code = generate_code().unwrap();
+        assert_eq!(code.len(), 32);
+        assert!(code.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
+
+    #[tokio::test]
+    async fn receiver_rejects_oversized_truncated_and_extra_body() {
+        let cases = [
+            b"POST /code HTTP/1.1\r\nContent-Length: 8193\r\n\r\n".to_vec(),
+            b"POST /code HTTP/1.1\r\nContent-Length: 4\r\n\r\n{}".to_vec(),
+            request("/code", r#"{"session_cookie":"sessionid=abc"}"#)
+                .into_iter()
+                .chain(b"extra".iter().copied())
+                .collect(),
+        ];
+        for raw in cases {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut sender = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            sender.write_all(&raw).await.unwrap();
+            sender.shutdown().await.unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            assert!(receive_request(&mut stream, "/code").await.is_err());
+        }
+    }
+    #[tokio::test]
+    async fn late_connection_cannot_extend_the_session_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(receive_session(
+            listener,
+            "/code",
+            Instant::now() + Duration::from_millis(300),
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let _stalled = TcpStream::connect(address).await;
+        let mut receiver = receiver;
+        let result = timeout(Duration::from_millis(200), &mut receiver).await;
+        if result.is_err() {
+            receiver.abort();
+            let _ = receiver.await;
+        }
+        assert!(
+            result.is_ok(),
+            "Una conexión tardía no debe reiniciar el tiempo de espera"
+        );
+        assert!(result.unwrap().unwrap().is_err());
     }
 }

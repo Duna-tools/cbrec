@@ -3,3 +3,5 @@ mod ffmpeg_process;
 
 pub(crate) use chaturbate_client::DiscoveredRoom;
 pub use chaturbate_client::{CalidadDisponible, ChaturbateClient, EstadoStream};
+
+pub(crate) mod thumbnail;

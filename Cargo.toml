@@ -2,7 +2,7 @@
 name = "cbrec"
 version = "0.0.2"
 edition = "2021"
-authors = ["Lucas"]
+authors = ["Duna-tools"]
 description = "Simple and efficient stream recorder"
 license = "MIT"
 repository = "https://github.com/Duna-tools/cbrec"
@@ -10,7 +10,7 @@ homepage = "https://github.com/Duna-tools/cbrec"
 
 [package.metadata]
 # Contact info used by packaging tools when available
-maintainer = "Lucas <lucas@users.noreply.github.com>"
+maintainer = "Duna-tools"
 
 [dependencies]
 # Async Runtime
@@ -24,6 +24,10 @@ colored = "2"
 # CLI
 clap = { version = "4.5", features = ["derive", "env"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+ratatui-image = { version = "11.0.6", default-features = false }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
+lru = "0.18.5"
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -46,13 +50,17 @@ fs4 = "1"
 quick-m3u8 = "0.7"
 getrandom = "0.3"
 
+[target.'cfg(unix)'.dependencies]
+# El poll alternativo evita perder teclado al coincidir entrada y resize en Mio.
+crossterm = { version = "0.29", default-features = false, features = ["use-dev-tty"] }
+
 [profile.release]
 lto = true
 codegen-units = 1
 strip = true
 
 [package.metadata.deb]
-maintainer = "Lucas"
+maintainer = "Duna-tools"
 depends = "$auto, ffmpeg"
 section = "video"
 priority = "optional"

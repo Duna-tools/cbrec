@@ -1,0 +1,11 @@
+# Configuracion de cargo-mutants para cbrec
+# Ver schema: https://json.schemastore.org/cargo-mutants-config.json
+
+test_tool = "cargo"
+minimum_test_timeout = 20.0
+timeout_multiplier = 2.0
+gitignore = true
+
+exclude_globs = [
+    "tests/**",
+]

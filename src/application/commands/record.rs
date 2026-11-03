@@ -1,6 +1,6 @@
 use crate::application::recording::{
-    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
-    write_recording_metadata, ResultadoGrabacion,
+    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, write_recording_metadata,
+    RecordingProgress, ResultadoGrabacion,
 };
 use crate::application::utils::{normalizar_modelos, ParametrosGrabacion};
 use crate::domain::value_objects::{ModelName, VideoQuality};
@@ -56,6 +56,7 @@ pub(crate) async fn grabar_modelos(
     let rx = Arc::new(tokio::sync::Mutex::new(rx));
     let mut tareas = JoinSet::new();
 
+    let worker_count = limite_concurrencia.min(modelos.len());
     for modelo in modelos {
         if tx.send(modelo).await.is_err() {
             break;
@@ -63,7 +64,7 @@ pub(crate) async fn grabar_modelos(
     }
     drop(tx);
 
-    for _ in 0..limite_concurrencia {
+    for _ in 0..worker_count {
         let client = Arc::clone(&client);
         let config = Arc::clone(&config);
         let raiz_salida = raiz_salida.clone();
@@ -195,18 +196,17 @@ async fn grabar_modelo(
         salida.mostrar_detalle_inicio_grabacion(&ruta);
     }
 
-    let parcial = ruta_parcial(&ruta);
     let salida_p = Arc::clone(&salida);
     let nombre_p = model_name.as_str().to_string();
-    let parcial_p = parcial.clone();
-    let progress_task = tokio::spawn(async move {
+    let output_path = ruta.clone();
+    let progress_task = RecordingProgress(tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            if let Ok(meta) = tokio::fs::metadata(&parcial_p).await {
+            if let Ok(meta) = tokio::fs::metadata(&output_path).await {
                 salida_p.mostrar_progreso_grabacion(&nombre_p, meta.len());
             }
         }
-    });
+    }));
 
     let started_at = chrono::Utc::now();
     let result = descargar_grabacion(client, &stream_url, ruta, quality, min_file_size).await;
@@ -237,6 +237,7 @@ async fn grabar_modelo(
                 salida.mostrar_cancelacion_resumida(model_name.as_str());
             }
         }
+        Ok(ResultadoGrabacion::Interrupted(_, reason)) => anyhow::bail!(reason),
         Err(e) => return Err(e.into()),
     }
 
@@ -254,7 +255,7 @@ mod tests {
         let parameters = ParametrosGrabacion {
             raiz_salida: None,
             quality: VideoQuality::Best,
-            limite_concurrencia: 1,
+            limite_concurrencia: 4096,
             min_file_size: None,
             cancel_rx,
             salida: Arc::new(ConsoleOutput::new(false, true)),

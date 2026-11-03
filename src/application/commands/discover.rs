@@ -61,7 +61,7 @@ pub(crate) async fn find_rooms(
     Ok(DiscoveryResult { tag, rooms })
 }
 
-fn normalize_tag(raw_tag: &str) -> anyhow::Result<String> {
+pub(crate) fn normalize_tag(raw_tag: &str) -> anyhow::Result<String> {
     let tag = raw_tag.trim().strip_prefix('#').unwrap_or(raw_tag.trim());
     if tag.is_empty()
         || tag.len() > 50
@@ -90,6 +90,7 @@ mod tests {
         let result = DiscoveryResult {
             tag: "gaming".to_string(),
             rooms: vec![DiscoveredRoom {
+                thumbnail_url: None,
                 username: "alice".to_string(),
                 subject: "hello".to_string(),
                 viewers: 42,

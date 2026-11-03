@@ -219,3 +219,9 @@ fn parse_remove_command() {
         _ => panic!("Se esperaba subcomando remove"),
     }
 }
+
+#[test]
+fn tui_can_start_at_home_without_a_tag() {
+    let cli = Cli::try_parse_from(["cbrec", "tui"]).expect("La TUI debe poder abrir el inicio");
+    assert!(matches!(cli.command, Some(Commands::Tui { tag, limit: 20 }) if tag.is_empty()));
+}

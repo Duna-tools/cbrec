@@ -18,6 +18,7 @@ pub(crate) enum ResultadoGrabacion {
     Guardado(PathBuf),
     Pequeno(PathBuf, u64),
     Cancelado,
+    Interrupted(PathBuf, String),
 }
 
 #[derive(Serialize)]
@@ -31,6 +32,7 @@ struct RecordingMetadata<'a> {
     classification: &'static str,
 }
 
+// Solo reconoce nombres anteriores para evitar colisiones con grabaciones existentes.
 pub(crate) fn ruta_parcial(ruta: &Path) -> PathBuf {
     let nombre = match (
         ruta.file_stem().and_then(|n| n.to_str()),
@@ -54,7 +56,7 @@ pub(crate) async fn preparar_ruta_grabacion(
 
     for intento in 0..1000 {
         let ruta = ruta_con_sufijo(&ruta_base, intento);
-        if ruta_disponible(&ruta).await? && reservar_parcial(&ruta).await? {
+        if ruta_disponible(&ruta).await? && reserve_recording_file(&ruta).await? {
             return Ok(ruta);
         }
     }
@@ -74,64 +76,64 @@ pub(crate) async fn descargar_grabacion<R>(
 where
     R: StreamRepository<Error = InfrastructureError>,
 {
-    let parcial = ruta_parcial(&ruta);
-
-    if let Some(parent) = ruta.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+    let download_error = client
+        .download_stream(stream_url, &ruta, quality)
+        .await
+        .err();
+    let size = match tokio::fs::metadata(&ruta).await {
+        Ok(metadata) => metadata.len(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.into()),
+    };
+    if size == 0 {
+        remove_empty_file(&ruta).await;
+        return match download_error {
+            Some(InfrastructureError::RecordingCancelled) => Ok(ResultadoGrabacion::Cancelado),
+            Some(error) => Err(error),
+            None => Err(InfrastructureError::RecordingError(
+                "la grabacion no contiene datos".to_string(),
+            )),
+        };
     }
 
-    match client.download_stream(stream_url, &parcial, quality).await {
-        Ok(()) => {}
-        Err(InfrastructureError::RecordingCancelled) => {
-            if !parcial_aprovechable(&parcial).await {
-                limpiar_parcial(&parcial).await;
-                return Ok(ResultadoGrabacion::Cancelado);
-            }
-
-            if !archivo_finalizable(&parcial).await {
-                return Ok(ResultadoGrabacion::Cancelado);
-            }
-        }
-        Err(e) => {
-            limpiar_parcial(&parcial).await;
-            return Err(e);
+    let finalized = archivo_finalizable(&ruta).await;
+    if let Some(error) = download_error {
+        if !matches!(error, InfrastructureError::RecordingCancelled) || !finalized {
+            return Ok(ResultadoGrabacion::Interrupted(
+                ruta.clone(),
+                format!(
+                    "{error}; grabacion interrumpida conservada en {}",
+                    ruta.display()
+                ),
+            ));
         }
     }
-
-    if !archivo_finalizable(&parcial).await {
-        limpiar_parcial(&parcial).await;
-        return Err(InfrastructureError::RecordingError(
-            "archivo parcial no parece un MP4 finalizado".to_string(),
+    if !finalized {
+        return Ok(ResultadoGrabacion::Interrupted(
+            ruta.clone(),
+            format!(
+                "MP4 sin finalizar; grabacion conservada en {}",
+                ruta.display()
+            ),
         ));
     }
 
-    let meta = match tokio::fs::metadata(&parcial).await {
-        Ok(meta) => meta,
-        Err(e) => {
-            limpiar_parcial(&parcial).await;
-            return Err(e.into());
-        }
-    };
-
-    if min_file_size.is_some_and(|min_file_size| meta.len() < min_file_size) {
+    if min_file_size.is_some_and(|minimum| size < minimum) {
         let small_dir = ruta
             .parent()
-            .map(|p| p.join("small"))
-            .unwrap_or_else(|| PathBuf::from("small"));
+            .unwrap_or_else(|| Path::new("."))
+            .join("small");
         tokio::fs::create_dir_all(&small_dir).await?;
-        let destino = small_dir.join(
-            ruta.file_name()
-                .unwrap_or_else(|| OsStr::new("cbrec.partial")),
-        );
-        tokio::fs::rename(&parcial, &destino).await?;
-        Ok(ResultadoGrabacion::Pequeno(destino, meta.len()))
+        let destination =
+            small_dir.join(ruta.file_name().unwrap_or_else(|| OsStr::new("cbrec.mp4")));
+        tokio::fs::rename(&ruta, &destination).await?;
+        Ok(ResultadoGrabacion::Pequeno(destination, size))
     } else {
-        tokio::fs::rename(&parcial, &ruta).await?;
         Ok(ResultadoGrabacion::Guardado(ruta))
     }
 }
 
-/// Writes the versioned JSON sidecar for a completed recording.
+/// Registra el resultado sin incluir URLs, cookies ni el detalle del error.
 pub(crate) async fn write_recording_metadata(
     result: &ResultadoGrabacion,
     model: &str,
@@ -142,6 +144,7 @@ pub(crate) async fn write_recording_metadata(
         ResultadoGrabacion::Guardado(path) => (path, "saved"),
         ResultadoGrabacion::Pequeno(path, _) => (path, "small"),
         ResultadoGrabacion::Cancelado => return Ok(()),
+        ResultadoGrabacion::Interrupted(path, _) => (path, "interrupted"),
     };
     let metadata = RecordingMetadata {
         schema_version: 1,
@@ -163,11 +166,17 @@ pub(crate) async fn write_recording_metadata(
     let temporary = path_with_suffix(&destination, ".part");
     if let Err(error) = tokio::fs::write(&temporary, content).await {
         let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(error.into());
+        return Err(InfrastructureError::RecordingError(format!(
+            "no se pudieron guardar los metadatos; video conservado en {}: {error}",
+            path.display()
+        )));
     }
     if let Err(error) = tokio::fs::rename(&temporary, &destination).await {
         let _ = tokio::fs::remove_file(&temporary).await;
-        return Err(error.into());
+        return Err(InfrastructureError::RecordingError(format!(
+            "no se pudieron guardar los metadatos; video conservado en {}: {error}",
+            path.display()
+        )));
     }
 
     Ok(())
@@ -179,22 +188,30 @@ fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-async fn probar_directorio_escribible(dir: &Path) -> Result<(), InfrastructureError> {
-    let probe = dir.join(format!(".cbrec_write_test_{}", std::process::id()));
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .await;
-
-    match file {
-        Ok(_) => {
-            let _ = tokio::fs::remove_file(&probe).await;
-            Ok(())
+pub(crate) async fn probar_directorio_escribible(dir: &Path) -> Result<(), InfrastructureError> {
+    for attempt in 0..1000 {
+        let probe = dir.join(format!(
+            ".cbrec_write_test_{}_{attempt}",
+            std::process::id()
+        ));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .await
+        {
+            Ok(file) => {
+                drop(file);
+                tokio::fs::remove_file(&probe).await?;
+                return Ok(());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.into()),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(e) => Err(e.into()),
     }
+    Err(InfrastructureError::RecordingError(
+        "no se pudo reservar un archivo de prueba".to_string(),
+    ))
 }
 
 async fn ruta_disponible(ruta: &Path) -> Result<bool, InfrastructureError> {
@@ -213,15 +230,17 @@ async fn ruta_disponible(ruta: &Path) -> Result<bool, InfrastructureError> {
         .unwrap_or_else(|| PathBuf::from("small"));
     let destino_small = small.join(ruta.file_name().unwrap_or_else(|| OsStr::new("cbrec.mp4")));
 
-    Ok(!existe(&destino_small).await?)
+    let metadata_small = path_with_suffix(&destino_small, ".json");
+    Ok(!existe(&destino_small).await?
+        && !existe(&metadata_small).await?
+        && !existe(&path_with_suffix(&metadata_small, ".part")).await?)
 }
 
-async fn reservar_parcial(ruta: &Path) -> Result<bool, InfrastructureError> {
-    let parcial = ruta_parcial(ruta);
+async fn reserve_recording_file(ruta: &Path) -> Result<bool, InfrastructureError> {
     match OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&parcial)
+        .open(ruta)
         .await
     {
         Ok(_) => Ok(true),
@@ -254,15 +273,13 @@ fn ruta_con_sufijo(ruta: &Path, intento: usize) -> PathBuf {
     ruta.with_file_name(nombre)
 }
 
-async fn limpiar_parcial(parcial: &Path) {
-    let _ = tokio::fs::remove_file(parcial).await;
-}
-
-async fn parcial_aprovechable(parcial: &Path) -> bool {
-    tokio::fs::metadata(parcial)
+async fn remove_empty_file(path: &Path) {
+    if tokio::fs::metadata(path)
         .await
-        .map(|meta| meta.len() > 0)
-        .unwrap_or(false)
+        .is_ok_and(|metadata| metadata.len() == 0)
+    {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 async fn archivo_finalizable(path: &Path) -> bool {
@@ -293,6 +310,8 @@ fn mp4_tiene_moov(path: &Path) -> bool {
         Err(_) => return false,
     };
     let mut offset = 0_u64;
+    let mut has_moov = false;
+    let mut has_media = false;
 
     while offset.saturating_add(8) <= total {
         if file.seek(SeekFrom::Start(offset)).is_err() {
@@ -320,11 +339,14 @@ fn mp4_tiene_moov(path: &Path) -> bool {
             size32
         };
 
-        if atom == b"moov" {
-            return true;
-        }
-        if size < header_size {
+        if size < header_size || size > total - offset {
             return false;
+        }
+        if atom == b"moov" {
+            has_moov = true;
+        }
+        if atom == b"mdat" && size > header_size {
+            has_media = true;
         }
 
         offset = match offset.checked_add(size) {
@@ -333,12 +355,20 @@ fn mp4_tiene_moov(path: &Path) -> bool {
         };
     }
 
-    false
+    offset == total && has_moov && has_media
 }
 
-pub(crate) async fn detener_tarea_progreso(task: JoinHandle<()>) {
-    task.abort();
-    let _ = task.await;
+pub(crate) struct RecordingProgress(pub(crate) JoinHandle<()>);
+
+impl Drop for RecordingProgress {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+pub(crate) async fn detener_tarea_progreso(mut task: RecordingProgress) {
+    task.0.abort();
+    let _ = (&mut task.0).await;
 }
 
 #[cfg(test)]
@@ -353,6 +383,37 @@ mod tests {
     struct RepoCanceladoConMp4Valido;
     struct RepoOkConParcial;
     struct RepoErrorConParcial;
+
+    #[tokio::test]
+    async fn recording_reserves_mp4_without_creating_part_file() {
+        let root = ruta_temporal("direct_mp4");
+        let base = root.join("alice.mp4");
+        let chosen = preparar_ruta_grabacion(base.clone()).await.unwrap();
+        assert_eq!(chosen, base);
+        assert!(chosen.exists());
+        assert!(!ruta_parcial(&chosen).exists());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_recordings_reserve_distinct_mp4_files() {
+        let root = ruta_temporal("concurrent_mp4");
+        let base = root.join("alice.mp4");
+        let (first, second) = tokio::join!(
+            preparar_ruta_grabacion(base.clone()),
+            preparar_ruta_grabacion(base)
+        );
+        let (first, second) = (first.unwrap(), second.unwrap());
+        assert_ne!(first, second);
+        assert!(first.exists());
+        assert!(second.exists());
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains(".part")));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 
     #[async_trait]
     impl StreamRepository for RepoCancelado {
@@ -478,6 +539,9 @@ mod tests {
         bytes.extend_from_slice(b"isom0000");
         bytes.extend_from_slice(&8_u32.to_be_bytes());
         bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&9_u32.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.push(0);
         bytes
     }
 
@@ -498,7 +562,7 @@ mod tests {
             .expect("prepara ruta");
 
         assert_eq!(preparada, ruta);
-        assert!(ruta_parcial(&preparada).exists());
+        assert!(preparada.exists());
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
@@ -516,7 +580,7 @@ mod tests {
             .expect("prepara ruta alternativa");
 
         assert_eq!(preparada, dir.join("alice_001.mp4"));
-        assert!(ruta_parcial(&preparada).exists());
+        assert!(preparada.exists());
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
@@ -534,7 +598,7 @@ mod tests {
             .expect("prepara ruta alternativa");
 
         assert_eq!(preparada, dir.join("alice_001.mp4"));
-        assert!(ruta_parcial(&preparada).exists());
+        assert!(preparada.exists());
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
@@ -552,7 +616,7 @@ mod tests {
             .expect("prepara ruta alternativa");
 
         assert_eq!(preparada, dir.join("alice_001.mp4"));
-        assert!(ruta_parcial(&preparada).exists());
+        assert!(preparada.exists());
         let _ = tokio::fs::remove_dir_all(dir).await;
     }
 
@@ -573,7 +637,7 @@ mod tests {
         let repo = RepoCanceladoConParcial;
         let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
         let ruta = ruta_temporal("cancelado_con_parcial");
-        let parcial = ruta_parcial(&ruta);
+        let parcial = ruta.clone();
 
         let resultado = descargar_grabacion(
             &repo,
@@ -584,9 +648,13 @@ mod tests {
         )
         .await;
 
-        assert!(matches!(resultado, Ok(ResultadoGrabacion::Cancelado)));
-        assert!(parcial.exists());
-        assert!(!ruta.exists());
+        let Ok(ResultadoGrabacion::Interrupted(path, reason)) = resultado else {
+            panic!("la interrupcion debe conservar su estado y su archivo");
+        };
+        assert_eq!(path, ruta);
+        assert!(reason.contains(&parcial.display().to_string()));
+        assert_eq!(tokio::fs::read(&parcial).await.unwrap(), b"parcial");
+        assert!(ruta.exists());
         let _ = tokio::fs::remove_file(parcial).await;
     }
 
@@ -608,17 +676,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn descargar_grabacion_limpia_parcial_si_falla_descarga() {
+    async fn descargar_grabacion_conserva_parcial_si_falla_descarga() {
         let repo = RepoErrorConParcial;
         let stream_url = StreamUrl::try_from("https://example.com/stream.m3u8").unwrap();
         let ruta = ruta_temporal("error_con_parcial");
-        let parcial = ruta_parcial(&ruta);
+        let parcial = ruta.clone();
 
         let resultado =
             descargar_grabacion(&repo, &stream_url, ruta, VideoQuality::Best, Some(1)).await;
 
-        assert!(resultado.is_err());
-        assert!(!parcial.exists());
+        assert!(matches!(
+            resultado,
+            Ok(ResultadoGrabacion::Interrupted(_, _))
+        ));
+        assert_eq!(tokio::fs::read(&parcial).await.unwrap(), b"parcial");
+        let _ = tokio::fs::remove_file(parcial).await;
     }
 
     #[tokio::test]
@@ -702,5 +774,126 @@ mod tests {
         assert!(!archivo_finalizable(&ruta).await);
 
         let _ = tokio::fs::remove_file(ruta).await;
+    }
+
+    #[tokio::test]
+    async fn mp4_rejects_truncated_moov() {
+        let path = ruta_temporal("truncated_moov");
+        let mut bytes = 100_u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"moov");
+        tokio::fs::write(&path, bytes).await.unwrap();
+        assert!(!archivo_finalizable(&path).await);
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn mp4_header_without_media_is_not_finalized() {
+        let path = ruta_temporal("empty_moov");
+        let mut bytes = mp4_minimo_valido();
+        bytes.truncate(bytes.len() - 9);
+        tokio::fs::write(&path, bytes).await.unwrap();
+        assert!(!archivo_finalizable(&path).await);
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_failure_preserves_media_and_reports_its_path() {
+        let root = ruta_temporal("metadata_failure");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("alice.mp4");
+        tokio::fs::write(&path, b"video").await.unwrap();
+        tokio::fs::create_dir(path_with_suffix(&path, ".json.part"))
+            .await
+            .unwrap();
+        let error = write_recording_metadata(
+            &ResultadoGrabacion::Guardado(path.clone()),
+            "alice",
+            VideoQuality::Best,
+            Utc::now(),
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(&path.display().to_string()));
+        assert_eq!(tokio::fs::read(path).await.unwrap(), b"video");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recording_preserves_orphan_small_metadata() {
+        for suffix in [".json", ".json.part"] {
+            let root = ruta_temporal("small_metadata");
+            let base = root.join("alice.mp4");
+            let small = root.join("small");
+            tokio::fs::create_dir_all(&small).await.unwrap();
+            let existing = path_with_suffix(&small.join("alice.mp4"), suffix);
+            tokio::fs::write(&existing, b"previous metadata")
+                .await
+                .unwrap();
+
+            let chosen = preparar_ruta_grabacion(base.clone()).await.unwrap();
+
+            assert_ne!(chosen, base);
+            assert_eq!(
+                tokio::fs::read(existing).await.unwrap(),
+                b"previous metadata"
+            );
+            tokio::fs::remove_dir_all(root).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn recording_probe_preserves_colliding_file() {
+        let root = ruta_temporal("probe_collision");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let existing = root.join(format!(".cbrec_write_test_{}_0", std::process::id()));
+        tokio::fs::write(&existing, b"previous data").await.unwrap();
+
+        probar_directorio_escribible(&root).await.unwrap();
+
+        assert_eq!(tokio::fs::read(existing).await.unwrap(), b"previous data");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_recording_preserves_bytes_and_next_recording_uses_another_path() {
+        let root = ruta_temporal("failure_retry");
+        let base = root.join("alice.mp4");
+        let chosen = preparar_ruta_grabacion(base.clone()).await.unwrap();
+        let partial = chosen.clone();
+        let url = StreamUrl::new("https://example.com/stream.m3u8").unwrap();
+
+        let result = descargar_grabacion(
+            &RepoErrorConParcial,
+            &url,
+            chosen,
+            VideoQuality::Best,
+            Some(1),
+        )
+        .await;
+
+        let Ok(ResultadoGrabacion::Interrupted(path, reason)) = result else {
+            panic!("se esperaba grabacion interrumpida");
+        };
+        assert_eq!(path, base);
+        assert!(reason.contains(&partial.display().to_string()));
+        write_recording_metadata(
+            &ResultadoGrabacion::Interrupted(path, reason),
+            "alice",
+            VideoQuality::Best,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &tokio::fs::read(path_with_suffix(&base, ".json"))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(metadata["classification"], "interrupted");
+        let retry = preparar_ruta_grabacion(base.clone()).await.unwrap();
+        assert_ne!(retry, base);
+        assert_eq!(tokio::fs::read(partial).await.unwrap(), b"parcial");
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

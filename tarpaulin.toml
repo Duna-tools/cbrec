@@ -1,0 +1,9 @@
+[tarpaulin]
+ignore-panics = true
+ignore-tests = true
+output-dir = "target/tarpaulin"
+out = ["Stdout", "Lcov"]
+exclude-files = [
+    "tests/*",
+    "src/main.rs",
+]

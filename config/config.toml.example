@@ -1,69 +1,69 @@
 [general]
-; Directorio base donde se guardarán las grabaciones.
-; Se crea cb_rec/<modelo> dentro de esta ruta.
-; Windows: C:\Users\<usuario>\Videos
-; Linux: /home/<usuario>/Videos
-output_root = ~/Videos
+# Directorio base donde se guardarán las grabaciones.
+# Se crea cb_rec/<modelo> dentro de esta ruta.
+# Windows: C:\Users\<usuario>\Videos
+# Linux: /home/<usuario>/Videos
+output_root = "~/Videos"
 
-; Tamaño mínimo de archivo (bytes). Archivos menores se marcan como parciales.
-; Debe ser mayor a 0.
-; 250 MiB por defecto: 262144000
+# Tamaño mínimo de archivo (bytes). Archivos menores se marcan como parciales.
+# Debe ser mayor a 0.
+# 250 MiB por defecto: 262144000
 min_file_size = 262144000
 
-; Espacio libre minimo antes y durante una grabacion.
-; 2 GiB por defecto; usa 0 para desactivar la proteccion.
+# Espacio libre minimo antes y durante una grabacion.
+# 2 GiB por defecto; usa 0 para desactivar la proteccion.
 min_free_space = 2147483648
 
 [naming]
-; Plantilla para nombres de archivo.
-; Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
-; Debe ser relativa y no puede contener ..
-template = {year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4
+# Plantilla para nombres de archivo.
+# Variables: {year}, {month}, {day}, {hour}, {minute}, {second}, {model}
+# Debe ser relativa y no puede contener ..
+template = "{year}.{month}.{day}_{hour}.{minute}.{second}_{model}.mp4"
 
-; Alternativas:
-; template = {model}/{year}-{month}-{day}_{hour}h{minute}m.mp4
-; template = {year}/{month}/{model}_{day}_{hour}{minute}.mp4
+# Alternativas:
+# template = {model}/{year}-{month}-{day}_{hour}h{minute}m.mp4
+# template = {year}/{month}/{model}_{day}_{hour}{minute}.mp4
 
 [watch]
-; Intervalo de polling cuando hay actividad reciente (segundos).
-; Debe ser mayor a 0.
+# Intervalo de polling cuando hay actividad reciente (segundos).
+# Debe ser mayor a 0.
 poll_interval_secs = 60
 
-; Intervalo de polling cuando todos los modelos llevan mucho tiempo offline (segundos).
-; Debe ser mayor o igual que poll_interval_secs.
+# Intervalo de polling cuando todos los modelos llevan mucho tiempo offline (segundos).
+# Debe ser mayor o igual que poll_interval_secs.
 poll_interval_idle_secs = 300
 
-; Minutos sin actividad para entrar en modo idle.
-; Debe ser mayor a 0.
+# Minutos sin actividad para entrar en modo idle.
+# Debe ser mayor a 0.
 idle_threshold_mins = 30
 
-; Máximo de grabaciones simultáneas en modo watch.
-; Rango seguro: 1..16.
+# Máximo de grabaciones simultáneas en modo watch.
+# Rango seguro: 1..16.
 max_simultaneous = 3
 
-; Segundos de espera tras un fallo antes de reintentar grabar ese modelo.
-; Debe ser mayor a 0.
+# Segundos de espera tras un fallo antes de reintentar grabar ese modelo.
+# Debe ser mayor a 0.
 cooldown_tras_fallo_secs = 300
 
-; Segundos de espera antes de auto-grabar cuando --ask esta activo.
-; Debe ser mayor a 0.
+# Segundos de espera antes de auto-grabar cuando --ask esta activo.
+# Debe ser mayor a 0.
 ask_timeout_secs = 5
 
-; Enviar notificacion de escritorio (notify-send) cuando un modelo se conecta.
+# Enviar notificacion de escritorio (notify-send) cuando un modelo se conecta.
 desktop_notify = true
 
-; Titulo de la notificacion. Cambiar para mayor discrecion (ej: "Sync", "Build").
+# Titulo de la notificacion. Cambiar para mayor discrecion (ej: "Sync", "Build").
 notif_titulo = "cbrec"
 
-; Cuerpo de la notificacion. {modelo} se reemplaza con el nombre del modelo.
+# Cuerpo de la notificacion. {modelo} se reemplaza con el nombre del modelo.
 notif_cuerpo = "{modelo}"
 
 [auth]
-; Cookie de sesión de Chaturbate (opcional).
-; Permite acceder a rooms privados/fan-only y reduce bloqueos de Cloudflare.
-; Cómo obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
-; Copia el valor de la cookie completa. Ejemplo:
-; session_cookie = "PHPSESSID=abc123xyz; chaturbatesid=def456"
-; Alternativa temporal sin guardarla en disco:
-; CBREC_SESSION_COOKIE="PHPSESSID=abc123xyz; chaturbatesid=def456" cbrec watch modelo
-; Evita --session-cookie cuando puedas: puede quedar visible en historial o procesos.
+# Cookie de sesión de Chaturbate (opcional).
+# Permite acceder a rooms privados/fan-only y reduce bloqueos de Cloudflare.
+# Cómo obtenerla: DevTools (F12) → Application → Cookies → chaturbate.com
+# Copia el valor de la cookie completa. Ejemplo:
+# session_cookie = "PHPSESSID=abc123xyz; chaturbatesid=def456"
+# Alternativa temporal sin guardarla en disco:
+# CBREC_SESSION_COOKIE="PHPSESSID=abc123xyz; chaturbatesid=def456" cbrec watch modelo
+# Evita --session-cookie cuando puedas: puede quedar visible en historial o procesos.

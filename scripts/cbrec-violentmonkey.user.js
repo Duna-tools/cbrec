@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         cbrec browser session bridge
 // @namespace    https://github.com/Duna-tools/cbrec
-// @version      1.0.0
+// @version      1.0.1
 // @description  Sends the active Chaturbate session to one cbrec command.
 // @match        https://chaturbate.com/*
 // @match        https://www.chaturbate.com/*
@@ -14,7 +14,7 @@
 (() => {
   "use strict";
 
-  const SESSION_COOKIE_NAMES = ["PHPSESSID", "chaturbatesid"];
+  const SESSION_COOKIE_NAMES = ["sessionid", "PHPSESSID", "chaturbatesid"];
   const SESSION_PATH_PREFIX = "/cbrec-session/";
 
   function listCookies() {

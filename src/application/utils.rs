@@ -38,8 +38,12 @@ pub(crate) fn aplicar_ffmpeg_path(client: ChaturbateClient, ruta: PathBuf) -> Ch
     client.with_ffmpeg_path(ruta)
 }
 
-pub(crate) async fn validar_ffmpeg(ruta: &Path, requiere_existencia: bool) -> anyhow::Result<()> {
-    obtener_version_ffmpeg(ruta, requiere_existencia)
+pub(crate) async fn validar_ffmpeg(
+    ruta: &Path,
+    requiere_existencia: bool,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    obtener_version_ffmpeg(ruta, requiere_existencia, cancel_rx)
         .await
         .map(|_| ())
 }
@@ -47,36 +51,70 @@ pub(crate) async fn validar_ffmpeg(ruta: &Path, requiere_existencia: bool) -> an
 pub(crate) async fn obtener_version_ffmpeg(
     ruta: &Path,
     requiere_existencia: bool,
+    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<String> {
     if requiere_existencia && !ruta.exists() {
         anyhow::bail!("Ruta de ffmpeg invalida: {}", ruta.display());
     }
 
-    let salida = tokio::process::Command::new(ruta)
+    if *cancel_rx.borrow() {
+        anyhow::bail!("validacion de FFmpeg cancelada");
+    }
+    let mut child = tokio::process::Command::new(ruta)
+        .env_remove(SESSION_COOKIE_ENV)
+        .kill_on_drop(true)
         .arg("-version")
-        .output()
-        .await;
-
-    match salida {
-        Ok(output) => {
-            if output.status.success() {
-                Ok(version_ffmpeg(&output.stdout)
-                    .unwrap_or_else(|| "version desconocida".to_string()))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                anyhow::anyhow!("ffmpeg no encontrado. Usa --ffmpeg-path")
             } else {
-                let detalle = resumen_salida_ffmpeg(&output.stderr)
-                    .or_else(|| resumen_salida_ffmpeg(&output.stdout));
-                if let Some(detalle) = detalle {
-                    anyhow::bail!("ffmpeg respondio con error: {}", detalle);
-                }
-                anyhow::bail!("ffmpeg respondio con error");
+                anyhow::anyhow!("No se pudo ejecutar ffmpeg: {error}")
             }
+        })?;
+    let stdout = child.stdout.take().expect("stdout configurado");
+    let stderr = child.stderr.take().expect("stderr configurado");
+    let result = tokio::select! {
+        result = async { tokio::try_join!(child.wait(), read_process_output(stdout), read_process_output(stderr)) } => result.map_err(anyhow::Error::from),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => Err(anyhow::anyhow!("La validacion de FFmpeg excedio cinco segundos")),
+        _ = cancel_rx.wait_for(|cancelled| *cancelled) => Err(anyhow::anyhow!("validacion de FFmpeg cancelada")),
+    };
+    let (status, stdout, stderr) = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(error);
         }
-        Err(err) => {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                anyhow::bail!("ffmpeg no encontrado. Usa --ffmpeg-path");
-            }
-            anyhow::bail!("No se pudo ejecutar ffmpeg: {}", err);
+    };
+    if !status.success() {
+        if let Some(detail) =
+            resumen_salida_ffmpeg(&stderr).or_else(|| resumen_salida_ffmpeg(&stdout))
+        {
+            anyhow::bail!("ffmpeg respondio con error: {detail}");
         }
+        anyhow::bail!("ffmpeg respondio con error");
+    }
+    Ok(version_ffmpeg(&stdout).unwrap_or_else(|| "version desconocida".to_string()))
+}
+
+async fn read_process_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT: usize = 64 * 1024;
+    let mut retained = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 {
+            return Ok(retained);
+        }
+        let keep = count.min(LIMIT.saturating_sub(retained.len()));
+        retained.extend_from_slice(&buffer[..keep]);
     }
 }
 
@@ -207,6 +245,72 @@ pub(crate) fn normalizar_modelos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn process_output_is_drained_but_retained_bytes_are_bounded() {
+        let data = vec![b'x'; 200_000];
+        let mut reader = data.as_slice();
+        let output = read_process_output(&mut reader).await.unwrap();
+        assert_eq!(output.len(), 64 * 1024);
+        assert!(reader.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_probe_cancellation_reaps_the_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "cbrec_cancel_probe_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::write(&path, "#!/bin/sh\necho $$ > \"$0.pid\"\nexec sleep 6\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let marker = PathBuf::from(format!("{}.pid", path.display()));
+        let (sender, receiver) = tokio::sync::watch::channel(false);
+        let operation = obtener_version_ffmpeg(&path, true, receiver);
+        tokio::pin!(operation);
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::select! {
+                    result = &mut operation => panic!("el proceso termino antes de cancelar: {result:?}"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
+                }
+            }
+        }).await.unwrap();
+        let pid = std::fs::read_to_string(&marker).unwrap();
+        sender.send(true).unwrap();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), &mut operation)
+            .await
+            .unwrap();
+        assert!(result.unwrap_err().to_string().contains("cancelada"));
+        #[cfg(target_os = "linux")]
+        assert!(!Path::new("/proc").join(pid.trim()).exists());
+        #[cfg(not(target_os = "linux"))]
+        let _ = pid;
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(marker).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ffmpeg_probe_has_a_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "cbrec_probe_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        std::fs::write(&path, "#!/bin/sh\nexec sleep 6\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (_sender, receiver) = tokio::sync::watch::channel(false);
+        let result = obtener_version_ffmpeg(&path, true, receiver).await;
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            result.is_err(),
+            "la validacion debe agotar su plazo antes de seis segundos"
+        );
+    }
 
     #[test]
     fn extraer_nombre_acepta_url_de_chaturbate() {

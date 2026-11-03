@@ -8,7 +8,7 @@ use std::future;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::Child;
+use tokio::process::{Child, ChildStdin};
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
 
@@ -41,7 +41,6 @@ pub(super) async fn run_ffmpeg(
     ffmpeg_path: &Path,
     stream_url: &str,
     output_path: &Path,
-    session_cookie: Option<&str>,
     max_duration_secs: Option<u64>,
     min_free_space: u64,
     cancel_rx: Option<watch::Receiver<bool>>,
@@ -66,11 +65,7 @@ pub(super) async fn run_ffmpeg(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
-    if let Some(cookie) = session_cookie {
-        command
-            .arg("-headers")
-            .arg(format!("Cookie: {}\r\n", cookie));
-    }
+    command.env_remove("CBREC_SESSION_COOKIE");
 
     let mut child = command
         .args(duration_args(max_duration_secs))
@@ -78,12 +73,15 @@ pub(super) async fn run_ffmpeg(
         .arg(stream_url)
         .arg("-c")
         .arg("copy")
+        .args(recording_format_args(output_path))
         .arg("-y")
         .arg(output_path)
         .spawn()
         .map_err(|e| {
             InfrastructureError::RecordingError(format!("Failed to start ffmpeg: {}", e))
         })?;
+    // Child::wait cierra stdin; conservarlo permite finalizar con q antes de recurrir a señales.
+    let mut stdin = child.stdin.take();
     let mut stderr_task = child
         .stderr
         .take()
@@ -91,7 +89,7 @@ pub(super) async fn run_ffmpeg(
 
     if let Some(mut cancel_rx) = cancel_rx {
         if *cancel_rx.borrow() {
-            cancel_ffmpeg(&mut child, stderr_task.take()).await;
+            cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
             return Err(InfrastructureError::RecordingCancelled);
         }
 
@@ -100,11 +98,11 @@ pub(super) async fn run_ffmpeg(
                 check_exit_status(status, stderr_task.take()).await?;
             }
             _ = async { cancel_rx.wait_for(|value| *value).await.ok(); } => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_duration_limit(max_duration_secs) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_stall(
@@ -112,14 +110,14 @@ pub(super) async fn run_ffmpeg(
                 Duration::from_secs(STALL_TIMEOUT_SECS),
                 Duration::from_secs(STALL_CHECK_SECS),
             ) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(InfrastructureError::RecordingError(format!(
                     "FFmpeg no escribio datos nuevos durante {} segundos",
                     STALL_TIMEOUT_SECS
                 )));
             }
             available = wait_for_low_disk(output_path, min_free_space) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(low_disk_error(available?, min_free_space));
             }
         }
@@ -129,7 +127,7 @@ pub(super) async fn run_ffmpeg(
                 check_exit_status(status, stderr_task.take()).await?;
             }
             _ = wait_for_duration_limit(max_duration_secs) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_stall(
@@ -137,20 +135,45 @@ pub(super) async fn run_ffmpeg(
                 Duration::from_secs(STALL_TIMEOUT_SECS),
                 Duration::from_secs(STALL_CHECK_SECS),
             ) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(InfrastructureError::RecordingError(format!(
                     "FFmpeg no escribio datos nuevos durante {} segundos",
                     STALL_TIMEOUT_SECS
                 )));
             }
             available = wait_for_low_disk(output_path, min_free_space) => {
-                cancel_ffmpeg(&mut child, stderr_task.take()).await;
+                cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
                 return Err(low_disk_error(available?, min_free_space));
             }
         }
     }
 
     Ok(())
+}
+
+fn recording_format_args(path: &Path) -> &'static [&'static str] {
+    if path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "mp4" | "m4v" | "mov"
+            )
+        })
+    {
+        // Los fragmentos limitan la memoria y conservan contenido legible ante un corte.
+        &[
+            "-movflags",
+            "+frag_keyframe+empty_moov+default_base_moof",
+            "-frag_duration",
+            "5000000",
+            "-flush_packets",
+            "1",
+        ]
+    } else {
+        &[]
+    }
 }
 
 fn ensure_disk_space(path: &Path, required: u64) -> Result<(), InfrastructureError> {
@@ -192,11 +215,11 @@ async fn check_exit_status(
     status: std::io::Result<ExitStatus>,
     stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
 ) -> Result<(), InfrastructureError> {
+    let stderr = read_stderr(stderr_task).await;
     let status = status.map_err(|e| {
         InfrastructureError::RecordingError(format!("Failed to wait for ffmpeg: {}", e))
     })?;
     if !status.success() {
-        let stderr = read_stderr(stderr_task).await;
         return Err(InfrastructureError::RecordingError(format_ffmpeg_error(
             status, &stderr,
         )));
@@ -228,13 +251,27 @@ async fn wait_for_duration_limit(max_duration_secs: Option<u64>) {
 
 async fn read_stderr(stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) -> Vec<u8> {
     match stderr_task {
-        Some(task) => task.await.unwrap_or_default(),
+        Some(mut task) => {
+            // Un descendiente puede conservar el pipe abierto aunque FFmpeg ya terminó.
+            match tokio::time::timeout(Duration::from_secs(1), &mut task).await {
+                Ok(result) => result.unwrap_or_default(),
+                Err(_) => {
+                    task.abort();
+                    let _ = task.await;
+                    Vec::new()
+                }
+            }
+        }
         None => Vec::new(),
     }
 }
 
-async fn cancel_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>) {
-    if !request_stdin_shutdown(child).await {
+async fn cancel_ffmpeg(
+    child: &mut Child,
+    stdin: Option<ChildStdin>,
+    stderr_task: Option<tokio::task::JoinHandle<Vec<u8>>>,
+) {
+    if !request_stdin_shutdown(stdin).await {
         request_process_shutdown(child);
     }
     if tokio::time::timeout(Duration::from_secs(SHUTDOWN_GRACE_SECS), child.wait())
@@ -247,8 +284,8 @@ async fn cancel_ffmpeg(child: &mut Child, stderr_task: Option<tokio::task::JoinH
     let _ = read_stderr(stderr_task).await;
 }
 
-async fn request_stdin_shutdown(child: &mut Child) -> bool {
-    let Some(mut stdin) = child.stdin.take() else {
+async fn request_stdin_shutdown(stdin: Option<ChildStdin>) -> bool {
+    let Some(mut stdin) = stdin else {
         return false;
     };
 
@@ -352,6 +389,10 @@ fn summarize_stderr(stderr: &[u8]) -> Option<String> {
 fn redact_sensitive_line(line: &str) -> String {
     if line.to_ascii_lowercase().contains("cookie:") {
         "Cookie: [redacted]".to_string()
+    } else if line.to_ascii_lowercase().contains("http://")
+        || line.to_ascii_lowercase().contains("https://")
+    {
+        "[URL multimedia omitida]".to_string()
     } else {
         line.to_string()
     }
@@ -360,6 +401,222 @@ fn redact_sensitive_line(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn stderr_reader_does_not_outlive_successful_process() {
+        let task = tokio::spawn(future::pending::<Vec<u8>>());
+        let abort = task.abort_handle();
+        #[cfg(unix)]
+        let status = {
+            use std::os::unix::process::ExitStatusExt;
+            ExitStatus::from_raw(0)
+        };
+        #[cfg(windows)]
+        let status = {
+            use std::os::windows::process::ExitStatusExt;
+            ExitStatus::from_raw(0)
+        };
+        check_exit_status(Ok(status), Some(task)).await.unwrap();
+        assert!(abort.is_finished(), "El lector no debe quedar ejecutandose");
+    }
+
+    #[tokio::test]
+    async fn stderr_reader_has_a_deadline_and_is_reaped() {
+        let task = tokio::spawn(future::pending::<Vec<u8>>());
+        let abort = task.abort_handle();
+        let result = tokio::time::timeout(Duration::from_secs(3), read_stderr(Some(task))).await;
+        assert!(
+            result.is_ok(),
+            "El cierre no debe esperar indefinidamente EOF"
+        );
+        assert!(
+            abort.is_finished(),
+            "El lector debe recogerse al vencer el plazo"
+        );
+    }
+
+    #[test]
+    fn stderr_does_not_expose_media_url_tokens() {
+        let summary = summarize_stderr(b"Error al abrir https://media.example/video?token=CANARY_FAKE_TOKEN\nfallo de conexion").unwrap();
+        assert!(!summary.contains("CANARY_FAKE_TOKEN"));
+        assert!(summary.contains("fallo de conexion"));
+    }
+
+    #[tokio::test]
+    #[ignore = "Requires FFmpeg and ffprobe; run explicitly in CI"]
+    async fn ffmpeg_smoke_records_playable_timed_clip() {
+        let root = std::env::temp_dir().join(format!(
+            "cbrec_ffmpeg_smoke_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.mp4");
+        let destination = root.join("clip.mp4");
+        let generated = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=64x64:r=10",
+                "-t",
+                "2",
+                "-c:v",
+                "mpeg4",
+            ])
+            .arg(&source)
+            .output()
+            .await
+            .expect("FFmpeg must be installed");
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+
+        run_ffmpeg(
+            Path::new("ffmpeg"),
+            source.to_str().unwrap(),
+            &destination,
+            Some(1),
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+        let probe = tokio::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nw=1:nk=1",
+            ])
+            .arg(&destination)
+            .output()
+            .await
+            .expect("ffprobe must be installed");
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let duration: f64 = String::from_utf8(probe.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            (0.9..=1.2).contains(&duration),
+            "Unexpected clip duration: {duration}"
+        );
+
+        let bytes = tokio::fs::read(&destination).await.unwrap();
+        let mut offset = 0;
+        let mut fragment_end = None;
+        while offset + 8 <= bytes.len() {
+            let size = u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            assert!(size >= 8 && offset + size <= bytes.len());
+            if &bytes[offset + 4..offset + 8] == b"mdat" {
+                fragment_end = Some(offset + size);
+                break;
+            }
+            offset += size;
+        }
+        // Simula el archivo persistido hasta el primer fragmento, sin el cierre final.
+        let interrupted = root.join("interrupted.mp4");
+        tokio::fs::write(
+            &interrupted,
+            &bytes[..fragment_end.expect("falta contenido multimedia")],
+        )
+        .await
+        .unwrap();
+        let decoded = tokio::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-xerror", "-i"])
+            .arg(&interrupted)
+            .args(["-f", "framehash", "-"])
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert!(String::from_utf8_lossy(&decoded.stdout)
+            .lines()
+            .any(|line| !line.starts_with('#') && !line.trim().is_empty()));
+
+        let live = root.join("live.mp4");
+        let mut child = tokio::process::Command::new("ffmpeg")
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .args(["-v", "error", "-re", "-stream_loop", "-1", "-i"])
+            .arg(&source)
+            .args(["-c", "copy"])
+            .args(recording_format_args(&live))
+            .arg(&live)
+            .spawn()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if tokio::fs::metadata(&live)
+                    .await
+                    .is_ok_and(|metadata| metadata.len() >= fragment_end.unwrap() as u64)
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("no se persistieron fragmentos durante la grabacion");
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+        let probe = tokio::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-count_packets",
+                "-show_entries",
+                "stream=nb_read_packets",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(&live)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&probe.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+                > 0
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn fragmentation_only_applies_to_mp4_containers() {
+        for extension in ["mp4", "MP4", "mov", "m4v"] {
+            assert!(!recording_format_args(Path::new(&format!("video.{extension}"))).is_empty());
+        }
+        for extension in ["mkv", "ts", "mp3"] {
+            assert!(recording_format_args(Path::new(&format!("video.{extension}"))).is_empty());
+        }
+    }
 
     #[test]
     fn duration_arguments_include_ffmpeg_limit() {
@@ -496,7 +753,7 @@ mod tests {
         command.kill_on_drop(true).stdin(Stdio::piped());
         let mut child = command.spawn().expect("start test process");
 
-        assert!(request_stdin_shutdown(&mut child).await);
+        assert!(request_stdin_shutdown(child.stdin.take()).await);
         let status = tokio::time::timeout(Duration::from_millis(500), child.wait())
             .await
             .expect("process must receive stdin command")
@@ -555,7 +812,8 @@ mod tests {
         command.kill_on_drop(true).stdin(Stdio::piped());
         let mut child = command.spawn().expect("start test process");
 
-        cancel_ffmpeg(&mut child, None).await;
+        let stdin = child.stdin.take();
+        cancel_ffmpeg(&mut child, stdin, None).await;
 
         assert!(child.try_wait().expect("inspect child status").is_some());
         assert_eq!(
@@ -577,7 +835,6 @@ mod tests {
             "https://example.com/live.m3u8",
             &output,
             None,
-            None,
             0,
             None,
         )
@@ -595,7 +852,6 @@ mod tests {
             Path::new("false"),
             "https://example.com/live.m3u8",
             &output,
-            None,
             None,
             0,
             None,
@@ -619,7 +875,6 @@ mod tests {
             "https://example.com/live.m3u8",
             &output,
             None,
-            None,
             0,
             Some(cancel_rx),
         )
@@ -642,7 +897,6 @@ mod tests {
             "https://example.com/live.m3u8",
             &output,
             None,
-            None,
             0,
             None,
         )
@@ -662,7 +916,6 @@ mod tests {
             &executable,
             "https://example.com/live.m3u8",
             &output,
-            None,
             None,
             u64::MAX,
             None,

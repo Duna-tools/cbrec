@@ -108,4 +108,11 @@ mod tests {
     fn test_stream_url_con_espacio_falla() {
         assert!(StreamUrl::new("https:// not valid").is_err());
     }
+
+    #[test]
+    fn test_stream_url_display() {
+        let url = StreamUrl::new("https://example.com/stream.m3u8").unwrap();
+        assert_eq!(format!("{url}"), "https://example.com/stream.m3u8");
+        assert_eq!(url.to_string(), "https://example.com/stream.m3u8");
+    }
 }

@@ -1,6 +1,6 @@
 use crate::application::recording::{
-    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, ruta_parcial,
-    write_recording_metadata, ResultadoGrabacion,
+    descargar_grabacion, detener_tarea_progreso, preparar_ruta_grabacion, write_recording_metadata,
+    RecordingProgress, ResultadoGrabacion,
 };
 use crate::domain::errors::DomainError;
 use crate::domain::repositories::StreamRepository;
@@ -12,9 +12,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncBufReadExt;
-use tokio::sync::watch;
-use tokio::task::JoinSet;
+use tokio::sync::{mpsc, watch, Mutex, Semaphore};
+use tokio::task::{Id, JoinSet};
+
+const MAX_CONCURRENT_STATUS_CHECKS: usize = 5;
+type RecordingCompletion = (String, Option<PathBuf>, bool);
 
 pub(crate) struct WatchParams<R = ChaturbateClient> {
     pub client: Arc<R>,
@@ -31,16 +33,40 @@ pub(crate) struct WatchParams<R = ChaturbateClient> {
 }
 
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant must_use attribute"
+)]
 pub(crate) trait WatchPrompter: Send + Sync {
     async fn confirmar_grabacion(&self, modelo: &str, cfg: &WatchConfig) -> bool;
 }
 
-pub(crate) struct ConsoleWatchPrompter;
+#[derive(Default)]
+pub(crate) struct ConsoleWatchPrompter {
+    input: Mutex<Option<mpsc::Receiver<String>>>,
+}
 
 #[async_trait]
 impl WatchPrompter for ConsoleWatchPrompter {
     async fn confirmar_grabacion(&self, modelo: &str, cfg: &WatchConfig) -> bool {
-        preguntar_con_timeout(modelo, cfg).await
+        let mut input = self.input.lock().await;
+        let input = input.get_or_insert_with(|| {
+            let (sender, receiver) = mpsc::channel(1);
+            // A dedicated thread avoids Tokio stdin blocking runtime shutdown.
+            std::thread::spawn(move || loop {
+                let mut line = String::new();
+                match std::io::stdin().read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if sender.blocking_send(line).is_err() {
+                            break;
+                        }
+                    }
+                }
+            });
+            receiver
+        });
+        preguntar_con_timeout(modelo, cfg, input).await
     }
 }
 
@@ -49,17 +75,24 @@ pub(crate) async fn ejecutar_watch(params: WatchParams) -> anyhow::Result<()> {
 }
 
 fn handle_recording_completion(
-    result: Result<(String, Option<PathBuf>, bool), tokio::task::JoinError>,
+    result: Result<(Id, RecordingCompletion), tokio::task::JoinError>,
+    task_models: &mut HashMap<Id, String>,
     states: &mut HashMap<String, EstadoModelo>,
     blocked_until: &mut HashMap<String, Instant>,
     failure_cooldown: Duration,
     output: &dyn Output,
 ) {
     let (model, final_path, failed) = match result {
-        Ok(completion) => completion,
+        Ok((id, completion)) => {
+            task_models.remove(&id);
+            completion
+        }
         Err(error) => {
             output.error_tarea_abortada(&error.to_string());
-            return;
+            let Some(model) = task_models.remove(&error.id()) else {
+                return;
+            };
+            (model, None, true)
         }
     };
 
@@ -101,7 +134,9 @@ where
     let mut omitidos: HashSet<String> = HashSet::new();
     let mut invalidos: HashSet<String> = HashSet::new();
     let mut bloqueados_hasta: HashMap<String, Instant> = HashMap::new();
+    let mut waiting: HashSet<String> = HashSet::new();
     let mut grabaciones: JoinSet<(String, Option<PathBuf>, bool)> = JoinSet::new();
+    let mut task_models = HashMap::new();
 
     let mut ultima_actividad = Instant::now()
         .checked_sub(Duration::from_secs(
@@ -109,10 +144,11 @@ where
         ))
         .unwrap_or_else(Instant::now);
 
-    loop {
-        while let Some(result) = grabaciones.try_join_next() {
+    'watch: loop {
+        while let Some(result) = grabaciones.try_join_next_with_id() {
             handle_recording_completion(
                 result,
+                &mut task_models,
                 &mut estados,
                 &mut bloqueados_hasta,
                 Duration::from_secs(config.watch.cooldown_tras_fallo_secs),
@@ -121,44 +157,84 @@ where
         }
 
         if *cancel_rx.borrow() {
-            salida.watch_deteniendo();
-            cancelar_grabaciones(&mut grabaciones).await;
             break;
         }
 
         let mut slots_disponibles = calcular_slots_disponibles(&estados, limite_concurrencia);
         let cooldown = Duration::from_secs(config.watch.cooldown_tras_fallo_secs);
+        let prioritize_waiting = slots_disponibles > 0
+            && waiting.iter().any(|name| {
+                debe_consultar_modelo(name, &estados, &omitidos, &invalidos, &bloqueados_hasta)
+            });
 
-        // Checks de estado en paralelo
+        // Checks de estado en paralelo acotados por semaforo
+        let semaforo = Arc::new(Semaphore::new(MAX_CONCURRENT_STATUS_CHECKS));
         let mut checks: JoinSet<(String, Result<Option<StreamUrl>, InfrastructureError>)> =
             JoinSet::new();
 
         for modelo in &modelos {
             let nombre = modelo.as_str().to_string();
+            // Se guardan candidatos, nunca URLs que podrían caducar mientras esperan.
+            if prioritize_waiting && !waiting.contains(&nombre) {
+                continue;
+            }
             if !debe_consultar_modelo(&nombre, &estados, &omitidos, &invalidos, &bloqueados_hasta) {
                 continue;
             }
             let client_c = Arc::clone(&client);
+            let sem = Arc::clone(&semaforo);
             let m = modelo.clone();
-            checks
-                .spawn(async move { (m.as_str().to_string(), client_c.get_stream_url(&m).await) });
+            checks.spawn(async move {
+                let _permit = sem.acquire().await.ok();
+                (m.as_str().to_string(), client_c.get_stream_url(&m).await)
+            });
         }
 
-        let mut online: Vec<(String, StreamUrl)> = Vec::new();
-        while let Some(Ok((nombre, resultado))) = checks.join_next().await {
-            match resultado {
+        loop {
+            let completed = tokio::select! {
+                result = checks.join_next() => result,
+                completed = grabaciones.join_next_with_id(), if !grabaciones.is_empty() => {
+                    if let Some(result) = completed {
+                        handle_recording_completion(
+                            result,
+                            &mut task_models,
+                            &mut estados,
+                            &mut bloqueados_hasta,
+                            cooldown,
+                            salida.as_ref(),
+                        );
+                        slots_disponibles = calcular_slots_disponibles(&estados, limite_concurrencia);
+                    }
+                    continue;
+                }
+                _ = esperar_cancelacion(cancel_rx.clone()) => break 'watch,
+            };
+            let Some(completed) = completed else { break };
+            let (nombre, resultado) = match completed {
+                Ok(result) => result,
+                Err(error) => {
+                    salida.error_tarea_abortada(&error.to_string());
+                    continue;
+                }
+            };
+            waiting.remove(&nombre);
+            let stream_url = match resultado {
                 Ok(Some(url)) => {
                     ultima_actividad = Instant::now();
                     salida.watch_tick_online(&nombre);
-                    online.push((nombre, url));
+                    url
                 }
-                Ok(None) => salida.watch_tick_offline(&nombre),
+                Ok(None) => {
+                    salida.watch_tick_offline(&nombre);
+                    continue;
+                }
                 Err(InfrastructureError::Domain(DomainError::ModelNotFound(_))) => {
                     salida.error_fallo_grabacion(
                         &nombre,
                         "modelo no encontrado, eliminado de monitoreo",
                     );
                     invalidos.insert(nombre);
+                    continue;
                 }
                 Err(e) => {
                     salida.advertir_error_consulta_estado(&nombre, &e.to_string());
@@ -166,20 +242,29 @@ where
                         nombre,
                         instante_tras(cooldown_para_error_consulta(&e, cooldown)),
                     );
+                    continue;
                 }
-            }
-        }
+            };
 
-        // Decisiones de grabación (secuencial para manejar stdin/slots)
-        for (nombre, stream_url) in online {
-            if *cancel_rx.borrow() || slots_disponibles == 0 {
-                break;
+            // Cada modelo puede iniciar sin esperar las demás consultas.
+            if *cancel_rx.borrow() {
+                break 'watch;
             }
-
-            if ask && !prompter.confirmar_grabacion(&nombre, &config.watch).await {
-                salida.watch_modelo_omitido(&nombre);
-                omitidos.insert(nombre);
+            if slots_disponibles == 0 {
+                waiting.insert(nombre);
                 continue;
+            }
+
+            if ask {
+                let accepted = tokio::select! {
+                    answer = prompter.confirmar_grabacion(&nombre, &config.watch) => answer,
+                    _ = esperar_cancelacion(cancel_rx.clone()) => break 'watch,
+                };
+                if !accepted {
+                    salida.watch_modelo_omitido(&nombre);
+                    omitidos.insert(nombre);
+                    continue;
+                }
             }
 
             salida.watch_inicio_grabacion(&nombre);
@@ -193,7 +278,7 @@ where
             let cancel_clone = cancel_rx.clone();
             let nombre_clone = nombre.clone();
 
-            grabaciones.spawn(async move {
+            let task = grabaciones.spawn(async move {
                 if *cancel_clone.borrow() {
                     return (nombre_clone, None, false);
                 }
@@ -210,15 +295,15 @@ where
 
                 let salida_p = Arc::clone(&salida_clone);
                 let nombre_p = nombre_clone.clone();
-                let parcial_p = ruta_parcial(&ruta);
-                let progress_task = tokio::spawn(async move {
+                let output_path = ruta.clone();
+                let progress_task = RecordingProgress(tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(Duration::from_secs(5)).await;
-                        if let Ok(meta) = tokio::fs::metadata(&parcial_p).await {
+                        if let Ok(meta) = tokio::fs::metadata(&output_path).await {
                             salida_p.mostrar_progreso_grabacion(&nombre_p, meta.len());
                         }
                     }
-                });
+                }));
 
                 let started_at = chrono::Utc::now();
                 let result = descargar_grabacion(
@@ -244,6 +329,10 @@ where
                 match result {
                     Ok(ResultadoGrabacion::Guardado(p)) => (nombre_clone, Some(p), false),
                     Ok(ResultadoGrabacion::Pequeno(p, _)) => (nombre_clone, Some(p), false),
+                    Ok(ResultadoGrabacion::Interrupted(_, error)) => {
+                        salida_clone.error_fallo_grabacion(&nombre_clone, &error);
+                        (nombre_clone, None, true)
+                    }
                     Ok(ResultadoGrabacion::Cancelado) => (nombre_clone, None, false),
                     Err(e) => {
                         salida_clone.error_fallo_grabacion(&nombre_clone, &e.to_string());
@@ -251,6 +340,11 @@ where
                     }
                 }
             });
+            task_models.insert(task.id(), nombre);
+        }
+
+        if prioritize_waiting && slots_disponibles > 0 {
+            continue 'watch;
         }
 
         let tiempo_idle = ultima_actividad.elapsed();
@@ -268,30 +362,38 @@ where
         loop {
             tokio::select! {
                 _ = &mut poll_delay => break,
-                completed = grabaciones.join_next(), if !grabaciones.is_empty() => {
+                completed = grabaciones.join_next_with_id(), if !grabaciones.is_empty() => {
                     if let Some(result) = completed {
                         handle_recording_completion(
                             result,
+                            &mut task_models,
                             &mut estados,
                             &mut bloqueados_hasta,
                             Duration::from_secs(config.watch.cooldown_tras_fallo_secs),
                             salida.as_ref(),
                         );
+                        if waiting.iter().any(|name| debe_consultar_modelo(name, &estados, &omitidos, &invalidos, &bloqueados_hasta)) {
+                            break;
+                        }
                     }
                 }
                 _ = esperar_cancelacion(cancel_rx.clone()) => {
-                    salida.watch_deteniendo();
-                    cancelar_grabaciones(&mut grabaciones).await;
-                    return Ok(());
+                    break 'watch;
                 }
             }
         }
     }
 
+    salida.watch_deteniendo();
+    finalizar_grabaciones(&mut grabaciones, salida.as_ref()).await;
     Ok(())
 }
 
-async fn preguntar_con_timeout(modelo: &str, cfg: &WatchConfig) -> bool {
+async fn preguntar_con_timeout(
+    modelo: &str,
+    cfg: &WatchConfig,
+    input: &mut mpsc::Receiver<String>,
+) -> bool {
     if cfg.desktop_notify {
         let cuerpo = cfg.notif_cuerpo.replace("{modelo}", modelo);
         let _ = tokio::process::Command::new("notify-send")
@@ -305,16 +407,10 @@ async fn preguntar_con_timeout(modelo: &str, cfg: &WatchConfig) -> bool {
     );
     let _ = std::io::Write::flush(&mut std::io::stdout());
 
-    let readline = async {
-        let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
-        let mut line = String::new();
-        let _ = reader.read_line(&mut line).await;
-        line
-    };
-
-    match tokio::time::timeout(Duration::from_secs(cfg.ask_timeout_secs), readline).await {
+    match tokio::time::timeout(Duration::from_secs(cfg.ask_timeout_secs), input.recv()).await {
         Err(_) => true,
-        Ok(line) => !line.trim().eq_ignore_ascii_case("n"),
+        Ok(Some(line)) => !line.trim().eq_ignore_ascii_case("n"),
+        Ok(None) => false,
     }
 }
 
@@ -322,9 +418,18 @@ async fn esperar_cancelacion(mut rx: watch::Receiver<bool>) {
     let _ = rx.wait_for(|v| *v).await;
 }
 
-async fn cancelar_grabaciones(grabaciones: &mut JoinSet<(String, Option<PathBuf>, bool)>) {
-    grabaciones.abort_all();
-    while grabaciones.join_next().await.is_some() {}
+async fn finalizar_grabaciones(
+    grabaciones: &mut JoinSet<(String, Option<PathBuf>, bool)>,
+    salida: &dyn Output,
+) {
+    // The shared cancellation receiver stops FFmpeg; let each task finalize its file.
+    while let Some(result) = grabaciones.join_next().await {
+        match result {
+            Ok((model, Some(path), _)) => salida.watch_fin_grabacion(&model, &path),
+            Err(error) => salida.error_tarea_abortada(&error.to_string()),
+            _ => {}
+        }
+    }
 }
 
 fn calcular_slots_disponibles(
@@ -392,6 +497,54 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    #[tokio::test]
+    async fn recording_panic_releases_slot_and_applies_cooldown() {
+        let mut recordings: JoinSet<(String, Option<PathBuf>, bool)> = JoinSet::new();
+        let task = recordings.spawn(async { panic!("recording failed") });
+        let mut task_models = HashMap::from([(task.id(), "alice".to_string())]);
+        let result = recordings.join_next_with_id().await.unwrap();
+        assert!(result.as_ref().unwrap_err().is_panic());
+        let mut states = estados(&[
+            ("alice", EstadoModelo::Grabando),
+            ("bob", EstadoModelo::Grabando),
+        ]);
+        let mut blocked_until = HashMap::new();
+
+        handle_recording_completion(
+            result,
+            &mut task_models,
+            &mut states,
+            &mut blocked_until,
+            Duration::from_secs(30),
+            &crate::presentation::ConsoleOutput::default(),
+        );
+
+        assert_eq!(states.get("alice"), Some(&EstadoModelo::Offline));
+        assert_eq!(states.get("bob"), Some(&EstadoModelo::Grabando));
+        assert_eq!(calcular_slots_disponibles(&states, 2), 1);
+        assert!(blocked_until["alice"] > Instant::now());
+        assert!(!blocked_until.contains_key("bob"));
+        assert!(task_models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_waits_for_recording_finalization() {
+        let finalized = Arc::new(AtomicUsize::new(0));
+        let marker = finalized.clone();
+        let mut recordings = JoinSet::new();
+        recordings.spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            marker.store(1, Ordering::SeqCst);
+            ("alice".into(), None, false)
+        });
+        finalizar_grabaciones(
+            &mut recordings,
+            &crate::presentation::ConsoleOutput::default(),
+        )
+        .await;
+        assert_eq!(finalized.load(Ordering::SeqCst), 1);
+    }
+
     enum RespuestaRepo {
         Online,
         NoEncontrado,
@@ -400,6 +553,9 @@ mod tests {
     struct RepoFake {
         respuesta: RespuestaRepo,
         consultas: AtomicUsize,
+        cancel_on_download: Option<watch::Sender<bool>>,
+        fail_download: bool,
+        panic_download: bool,
     }
 
     impl RepoFake {
@@ -407,6 +563,9 @@ mod tests {
             Self {
                 respuesta: RespuestaRepo::Online,
                 consultas: AtomicUsize::new(0),
+                cancel_on_download: None,
+                fail_download: false,
+                panic_download: false,
             }
         }
 
@@ -414,6 +573,9 @@ mod tests {
             Self {
                 respuesta: RespuestaRepo::NoEncontrado,
                 consultas: AtomicUsize::new(0),
+                cancel_on_download: None,
+                fail_download: false,
+                panic_download: false,
             }
         }
 
@@ -447,7 +609,19 @@ mod tests {
             output_path: &Path,
             _quality: VideoQuality,
         ) -> Result<(), Self::Error> {
+            if let Some(cancel) = &self.cancel_on_download {
+                cancel.send(true).unwrap();
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
             tokio::fs::write(output_path, mp4_minimo_valido()).await?;
+            if self.panic_download {
+                panic!("fallo de grabación simulado");
+            }
+            if self.fail_download {
+                return Err(InfrastructureError::RecordingError(
+                    "corte de red simulado".to_string(),
+                ));
+            }
             Ok(())
         }
     }
@@ -455,6 +629,8 @@ mod tests {
     struct OutputFake {
         eventos: Mutex<Vec<String>>,
         cancel_tx: watch::Sender<bool>,
+        cancel_on_finish: bool,
+        event_changed: tokio::sync::Notify,
     }
 
     impl OutputFake {
@@ -462,6 +638,8 @@ mod tests {
             Self {
                 eventos: Mutex::new(Vec::new()),
                 cancel_tx,
+                cancel_on_finish: true,
+                event_changed: tokio::sync::Notify::new(),
             }
         }
 
@@ -471,6 +649,17 @@ mod tests {
 
         fn evento(&self, evento: impl Into<String>) {
             self.eventos.lock().unwrap().push(evento.into());
+            self.event_changed.notify_waiters();
+        }
+    }
+
+    async fn wait_for_event(output: &OutputFake, event: &str) {
+        loop {
+            let changed = output.event_changed.notified();
+            if output.eventos().iter().any(|recorded| recorded == event) {
+                return;
+            }
+            changed.await;
         }
     }
 
@@ -502,7 +691,12 @@ mod tests {
             self.evento(format!("error:{modelo}"));
             let _ = self.cancel_tx.send(true);
         }
-        fn error_tarea_abortada(&self, _error: &str) {}
+        fn error_tarea_abortada(&self, _error: &str) {
+            self.evento("tarea_abortada");
+        }
+        fn mostrar_progreso_grabacion(&self, model: &str, _bytes: u64) {
+            self.evento(format!("progreso:{model}"));
+        }
         fn mostrar_inicio_detallado(&self, _modelo: &str, _calidad: &str) {}
         fn mostrar_inicio_resumido(&self, _modelo: &str, _calidad: &str) {}
         fn mostrar_verificando_disponibilidad(&self) {}
@@ -534,7 +728,9 @@ mod tests {
         }
         fn watch_fin_grabacion(&self, modelo: &str, _ruta: &Path) {
             self.evento(format!("fin:{modelo}"));
-            let _ = self.cancel_tx.send(true);
+            if self.cancel_on_finish {
+                let _ = self.cancel_tx.send(true);
+            }
         }
         fn watch_modelo_omitido(&self, modelo: &str) {
             self.evento(format!("omitido:{modelo}"));
@@ -606,7 +802,336 @@ mod tests {
         bytes.extend_from_slice(b"isom0000");
         bytes.extend_from_slice(&8_u32.to_be_bytes());
         bytes.extend_from_slice(b"moov");
+        bytes.extend_from_slice(&9_u32.to_be_bytes());
+        bytes.extend_from_slice(b"mdat");
+        bytes.push(0);
         bytes
+    }
+
+    #[tokio::test]
+    async fn online_model_starts_before_slow_status_check_finishes() {
+        struct GatedRepository {
+            recording_started: tokio::sync::Notify,
+            downloads: AtomicUsize,
+        }
+
+        #[async_trait]
+        impl StreamRepository for GatedRepository {
+            type Error = InfrastructureError;
+
+            async fn get_stream_url(
+                &self,
+                model: &ModelName,
+            ) -> Result<Option<StreamUrl>, Self::Error> {
+                if model.as_str() == "bob" {
+                    self.recording_started.notified().await;
+                    return Ok(None);
+                }
+                Ok(Some(StreamUrl::new("https://example.com/stream.m3u8")?))
+            }
+
+            async fn download_stream(
+                &self,
+                _url: &StreamUrl,
+                path: &Path,
+                _quality: VideoQuality,
+            ) -> Result<(), Self::Error> {
+                self.downloads.fetch_add(1, Ordering::SeqCst);
+                self.recording_started.notify_one();
+                tokio::fs::write(path, mp4_minimo_valido()).await?;
+                Ok(())
+            }
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let repository = Arc::new(GatedRepository {
+            recording_started: tokio::sync::Notify::new(),
+            downloads: AtomicUsize::new(0),
+        });
+        let config = config_test();
+        let root = config.output_root.clone();
+        let output = Arc::new(OutputFake::new(cancel_tx));
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            ejecutar_watch_con_repo(WatchParams {
+                client: repository.clone(),
+                config: Arc::new(config),
+                modelos: vec![modelo("alice"), modelo("bob")],
+                ask: false,
+                raiz_salida: None,
+                quality: VideoQuality::Best,
+                limite_concurrencia: 1,
+                min_file_size: Some(1),
+                cancel_rx,
+                salida: output.clone(),
+                prompter: Arc::new(PrompterFake::new(true)),
+            }),
+        )
+        .await;
+        let _ = tokio::fs::remove_dir_all(root).await;
+        result
+            .expect("alice debe grabar sin esperar la consulta lenta de bob")
+            .unwrap();
+        assert_eq!(repository.downloads.load(Ordering::SeqCst), 1);
+        assert!(output.eventos().contains(&"grabando:alice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn recording_panic_stops_progress_updates() {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let mut repository = RepoFake::online();
+        repository.panic_download = true;
+        let mut config = config_test();
+        config.watch.poll_interval_secs = 60;
+        config.watch.poll_interval_idle_secs = 60;
+        let root = config.output_root.clone();
+        let output = Arc::new(OutputFake::new(cancel_tx.clone()));
+        let watcher = tokio::spawn(ejecutar_watch_con_repo(WatchParams {
+            client: Arc::new(repository),
+            config: Arc::new(config),
+            modelos: vec![modelo("alice")],
+            ask: false,
+            raiz_salida: None,
+            quality: VideoQuality::Best,
+            limite_concurrencia: 1,
+            min_file_size: Some(1),
+            cancel_rx,
+            salida: output.clone(),
+            prompter: Arc::new(PrompterFake::new(true)),
+        }));
+        let aborted = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_event(&output, "tarea_abortada"),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(5_100)).await;
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let events = output.eventos();
+        tokio::fs::remove_dir_all(root).await.unwrap();
+        aborted.expect("debe observarse el panic de la grabación");
+        assert!(
+            !events.contains(&"progreso:alice".to_string()),
+            "el progreso debe detenerse al fallar la tarea: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_online_model_starts_when_recording_slot_is_released() {
+        struct QueuedRepository {
+            alice_started: tokio::sync::Notify,
+            bob_checks: AtomicUsize,
+            finish_alice: tokio::sync::Notify,
+            bob_started: tokio::sync::Notify,
+        }
+
+        #[async_trait]
+        impl StreamRepository for QueuedRepository {
+            type Error = InfrastructureError;
+
+            async fn get_stream_url(
+                &self,
+                model: &ModelName,
+            ) -> Result<Option<StreamUrl>, Self::Error> {
+                if model.as_str() == "bob" {
+                    let check = self.bob_checks.fetch_add(1, Ordering::SeqCst);
+                    if check == 0 {
+                        self.alice_started.notified().await;
+                    }
+                    return Ok(Some(StreamUrl::new(format!(
+                        "https://example.com/bob?revision={check}"
+                    ))?));
+                }
+                Ok(Some(StreamUrl::new(format!(
+                    "https://example.com/{}",
+                    model.as_str()
+                ))?))
+            }
+
+            async fn download_stream(
+                &self,
+                url: &StreamUrl,
+                path: &Path,
+                _quality: VideoQuality,
+            ) -> Result<(), Self::Error> {
+                if url.as_str().ends_with("/alice") {
+                    self.alice_started.notify_one();
+                    self.finish_alice.notified().await;
+                } else {
+                    assert!(
+                        url.as_str().ends_with("?revision=1"),
+                        "debe consultarse una URL nueva al liberar la plaza"
+                    );
+                    self.bob_started.notify_one();
+                }
+                tokio::fs::write(path, mp4_minimo_valido()).await?;
+                Ok(())
+            }
+        }
+
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let repository = Arc::new(QueuedRepository {
+            alice_started: tokio::sync::Notify::new(),
+            bob_checks: AtomicUsize::new(0),
+            finish_alice: tokio::sync::Notify::new(),
+            bob_started: tokio::sync::Notify::new(),
+        });
+        let mut config = config_test();
+        config.watch.poll_interval_secs = 60;
+        config.watch.poll_interval_idle_secs = 60;
+        let root = config.output_root.clone();
+        let mut output = OutputFake::new(cancel_tx.clone());
+        output.cancel_on_finish = false;
+        let output = Arc::new(output);
+        let watcher = tokio::spawn(ejecutar_watch_con_repo(WatchParams {
+            client: repository.clone(),
+            config: Arc::new(config),
+            modelos: vec![modelo("alice"), modelo("bob")],
+            ask: false,
+            raiz_salida: None,
+            quality: VideoQuality::Best,
+            limite_concurrencia: 1,
+            min_file_size: Some(1),
+            cancel_rx,
+            salida: output.clone(),
+            prompter: Arc::new(PrompterFake::new(true)),
+        }));
+        let online = tokio::time::timeout(
+            Duration::from_secs(2),
+            wait_for_event(&output, "online:bob"),
+        )
+        .await;
+        repository.finish_alice.notify_one();
+        let started = tokio::time::timeout(
+            Duration::from_millis(500),
+            repository.bob_started.notified(),
+        )
+        .await;
+        cancel_tx.send(true).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), watcher)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        tokio::fs::remove_dir_all(root).await.unwrap();
+        online.expect("bob debe detectarse online mientras alice ocupa la plaza");
+        started
+            .expect("bob debe iniciar al liberarse la plaza, sin esperar el sondeo de 60 segundos");
+        assert!(output.eventos().contains(&"fin:alice".to_string()));
+    }
+
+    #[tokio::test]
+    async fn watch_interruption_keeps_mp4_and_metadata_without_reporting_success() {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let mut repository = RepoFake::online();
+        repository.fail_download = true;
+        let config = config_test();
+        let root = config.output_root.clone();
+        let output = Arc::new(OutputFake::new(cancel_tx));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            ejecutar_watch_con_repo(WatchParams {
+                client: Arc::new(repository),
+                config: Arc::new(config),
+                modelos: vec![modelo("alice")],
+                ask: false,
+                raiz_salida: None,
+                quality: VideoQuality::Best,
+                limite_concurrencia: 1,
+                min_file_size: Some(u64::MAX),
+                cancel_rx,
+                salida: output.clone(),
+                prompter: Arc::new(PrompterFake::new(true)),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let files: Vec<_> = std::fs::read_dir(root.join("cb_rec/alice"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(files.len(), 2);
+        let media = files
+            .iter()
+            .find(|path| path.extension().is_some_and(|extension| extension == "mp4"))
+            .unwrap();
+        assert_eq!(tokio::fs::read(media).await.unwrap(), mp4_minimo_valido());
+        let sidecar = files
+            .iter()
+            .find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "json")
+            })
+            .unwrap();
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(sidecar).await.unwrap()).unwrap();
+        assert_eq!(metadata["classification"], "interrupted");
+        assert!(output.eventos().contains(&"error:alice".to_string()));
+        assert!(!output.eventos().contains(&"fin:alice".to_string()));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn watch_cancellation_preserves_final_file_and_metadata() {
+        let (cancel_tx, cancel_rx) = watch::channel(false);
+        let mut repo = RepoFake::online();
+        repo.cancel_on_download = Some(cancel_tx.clone());
+        let config = config_test();
+        let output_root = config.output_root.clone();
+        let output = Arc::new(OutputFake::new(cancel_tx));
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            ejecutar_watch_con_repo(WatchParams {
+                client: Arc::new(repo),
+                config: Arc::new(config),
+                modelos: vec![modelo("alice")],
+                ask: false,
+                raiz_salida: None,
+                quality: VideoQuality::Best,
+                limite_concurrencia: 1,
+                min_file_size: Some(1),
+                cancel_rx,
+                salida: output.clone(),
+                prompter: Arc::new(PrompterFake::new(true)),
+            }),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let files = std::fs::read_dir(output_root.join("cb_rec/alice"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files.len(),
+            2,
+            "Expected final media and sidecar: {files:?}"
+        );
+        assert!(files.iter().any(|path| path.extension().unwrap() == "mp4"));
+        assert!(files.iter().any(|path| path.extension().unwrap() == "json"));
+        assert!(!files
+            .iter()
+            .any(|path| path.to_string_lossy().contains(".part.")));
+        assert!(output.eventos().contains(&"fin:alice".to_string()));
+        tokio::fs::remove_dir_all(output_root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn prompt_handles_no_and_closed_input() {
+        let (sender, mut receiver) = mpsc::channel(1);
+        let config = WatchConfig {
+            desktop_notify: false,
+            ..WatchConfig::default()
+        };
+        sender.send("n\n".into()).await.unwrap();
+        assert!(!preguntar_con_timeout("alice", &config, &mut receiver).await);
+        drop(sender);
+        assert!(!preguntar_con_timeout("alice", &config, &mut receiver).await);
     }
 
     #[tokio::test]

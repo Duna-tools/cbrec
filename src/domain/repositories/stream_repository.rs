@@ -2,6 +2,10 @@ use crate::domain::value_objects::{ModelName, StreamUrl, VideoQuality};
 use async_trait::async_trait;
 
 #[async_trait]
+#[allow(
+    clippy::double_must_use,
+    reason = "async_trait generates the redundant must_use attribute"
+)]
 pub trait StreamRepository: Send + Sync {
     type Error: std::error::Error + Send + Sync + 'static;
 

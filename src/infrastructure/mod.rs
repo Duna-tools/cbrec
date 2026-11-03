@@ -4,6 +4,7 @@ pub mod errors;
 pub mod external;
 
 pub use browser_session::receive_browser_session;
+pub(crate) use browser_session::receive_browser_session_with_prompt;
 pub(crate) use config::expandir_tilde;
 pub use config::{AppConfig, ConfigWarning, LoadedAppConfig, WatchConfig, WatchedModels};
 pub use errors::InfrastructureError;

@@ -107,4 +107,11 @@ mod tests {
             assert!(result.is_err(), "Expected {} to fail", name);
         }
     }
+
+    #[test]
+    fn test_model_name_display() {
+        let model = ModelName::new("alice_123").unwrap();
+        assert_eq!(format!("{model}"), "alice_123");
+        assert_eq!(model.to_string(), "alice_123");
+    }
 }

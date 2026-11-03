@@ -291,7 +291,7 @@ impl Output for ConsoleOutput {
             "[{}] {}: {}",
             estado.yellow().bold(),
             modelo.cyan(),
-            detalle
+            sanitize_external_text(detalle)
         );
     }
 
@@ -495,5 +495,35 @@ mod tests {
     fn external_text_cannot_inject_terminal_controls() {
         assert_eq!(sanitize_external_text("ok\n\u{1b}[31m"), "ok  [31m");
         assert_eq!(sanitize_external_text(&"a".repeat(121)).len(), 120);
+    }
+    #[test]
+    fn detailed_status_cannot_inject_terminal_controls() {
+        use crate::presentation::{ConsoleOutput, Output};
+        const CHILD_FLAG: &str = "CBREC_TEST_STATUS_OUTPUT";
+        if std::env::var_os(CHILD_FLAG).is_some() {
+            ConsoleOutput::default().mostrar_estado_modelo_detalle(
+                "alice",
+                "SESION",
+                "private\u{1b}[31m\nFAKE",
+            );
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "presentation::output::tests::detailed_status_cannot_inject_terminal_controls",
+                "--nocapture",
+            ])
+            .env(CHILD_FLAG, "1")
+            .env("NO_COLOR", "1")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            !stdout.contains('\u{1b}'),
+            "El detalle remoto no debe controlar la terminal"
+        );
+        assert!(stdout.contains("private [31m FAKE"));
     }
 }

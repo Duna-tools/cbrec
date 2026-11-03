@@ -5,3 +5,5 @@ pub(crate) mod utils;
 pub(crate) mod watch_service;
 
 pub use cli_controller::ejecutar_cli;
+
+pub(crate) mod thumbnail;

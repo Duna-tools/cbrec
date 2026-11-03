@@ -1,3 +1,4 @@
+use crate::application::recording::probar_directorio_escribible;
 use crate::application::utils::{normalizar_modelo, obtener_version_ffmpeg};
 use crate::infrastructure::{AppConfig, WatchedModels};
 use crate::presentation::Output;
@@ -9,18 +10,22 @@ pub(crate) async fn ejecutar_doctor(
     ffmpeg_explicito: bool,
     raiz_salida: Option<std::path::PathBuf>,
     salida: &dyn Output,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let mut fallos = 0usize;
     let mut advertencias = 0usize;
 
     salida.doctor_inicio();
 
-    match obtener_version_ffmpeg(ffmpeg_path, ffmpeg_explicito).await {
+    match obtener_version_ffmpeg(ffmpeg_path, ffmpeg_explicito, cancel_rx.clone()).await {
         Ok(version) => salida.doctor_ok(
             "ffmpeg",
             &format!("{} ({})", ffmpeg_path.display(), version),
         ),
         Err(e) => {
+            if *cancel_rx.borrow() {
+                return Err(e);
+            }
             fallos += 1;
             salida.doctor_error("ffmpeg", &e.to_string());
         }
@@ -101,8 +106,31 @@ async fn probar_salida(
         .parent()
         .ok_or_else(|| anyhow::anyhow!("ruta de salida sin directorio padre"))?;
     tokio::fs::create_dir_all(dir).await?;
-    let probe = dir.join(".cbrec_doctor_write_test");
-    tokio::fs::write(&probe, b"ok").await?;
-    tokio::fs::remove_file(&probe).await?;
+    probar_directorio_escribible(dir).await?;
     Ok(dir.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn doctor_preserves_existing_probe_file() {
+        let root = std::env::temp_dir().join(format!(
+            "cbrec_doctor_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        let config = AppConfig::default();
+        let path = config.get_output_path("alice", Some(&root));
+        let dir = path.parent().unwrap();
+        tokio::fs::create_dir_all(dir).await.unwrap();
+        let existing = dir.join(".cbrec_doctor_write_test");
+        tokio::fs::write(&existing, b"previous data").await.unwrap();
+
+        probar_salida(&config, Some(&root)).await.unwrap();
+
+        assert_eq!(tokio::fs::read(&existing).await.unwrap(), b"previous data");
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }
