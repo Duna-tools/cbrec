@@ -2,15 +2,17 @@ name: Build & Release
 
 on:
   push:
-    branches: [main, master, develop]
+    branches: [main, beta, master, develop]
     tags:
       - "v*"
   pull_request:
-    branches: [main, master, develop]
+    branches: [main, beta, master, develop]
   workflow_dispatch:
+  schedule:
+    - cron: '0 14 * * 1'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ startsWith(github.ref, 'refs/tags/v') && 'release' || github.event_name }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
 
 permissions:
@@ -30,24 +32,19 @@ env:
   FFMPEG_SHA256: 1c17a2af80ca4f85e3e72a1137eb4645f8a88c2e2d754339e270b1f234f8d49c
 
 jobs:
-  # ─────────────────────────────────────────────────────────
-  # 1. TEST — corre en cada push / PR en los 3 sistemas
-  # ─────────────────────────────────────────────────────────
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+  preflight:
+    name: Validación inicial
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
 
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+          fetch-depth: 0
 
-      - name: Check GitHub Actions workflows (ubuntu only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Validar workflows de GitHub Actions
         shell: bash
         run: |
           set -euo pipefail
@@ -60,8 +57,7 @@ jobs:
           tar -xzf "${tool_dir}/${archive}" -C "${tool_dir}" actionlint
           "${tool_dir}/actionlint" -color
 
-      - name: Check release artifact contract (ubuntu only)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Validar el contrato de los artefactos
         shell: bash
         run: |
           set -euo pipefail
@@ -70,19 +66,58 @@ jobs:
           for prefix in "${prefixes[@]}"; do
             grep -Fq "$prefix" README.md
           done
+          grep -Fq "$FFMPEG_RELEASE_TAG" THIRD_PARTY_NOTICES.md
+          grep -Fq "$FFMPEG_ASSET" THIRD_PARTY_NOTICES.md
+          python3 scripts/check_release.py --self-test
+          python3 scripts/check_release.py --public-metadata
+
+      - name: Validar tag y versión antes de compilar
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/check_release.py --tag "$RELEASE_TAG"
+          case "$RELEASE_TAG" in
+            *-beta.*|*-rc.*) release_branch=beta ;;
+            *) release_branch=main ;;
+          esac
+          git merge-base --is-ancestor "$GITHUB_SHA" "origin/$release_branch"
+
+      - name: Preparar rustfmt
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Comprobar formato
+        run: cargo fmt -- --check
+
+  test:
+    name: Test (${{ matrix.os }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
         with:
           toolchain: stable
-          components: rustfmt, clippy, llvm-tools-preview
+          components: ${{ matrix.os == 'ubuntu-latest' && 'clippy,llvm-tools-preview' || '' }}
 
       - name: Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      - name: Check formatting (ubuntu only)
-        if: matrix.os == 'ubuntu-latest'
-        run: cargo fmt -- --check
 
       - name: Run clippy (ubuntu only)
         if: matrix.os == 'ubuntu-latest'
@@ -96,27 +131,61 @@ jobs:
 
       - name: Run tests
         if: matrix.os != 'ubuntu-latest'
-        run: cargo test --locked
+        run: cargo test --locked --all-targets --all-features
 
       - name: Install cargo-llvm-cov (ubuntu only)
         if: matrix.os == 'ubuntu-latest'
         run: cargo install cargo-llvm-cov --version "$CARGO_LLVM_COV_VERSION" --locked
 
-      - name: Run tests with coverage (ubuntu only)
+      - name: Instalar FFmpeg para las pruebas multimedia (Ubuntu)
         if: matrix.os == 'ubuntu-latest'
-        run: cargo llvm-cov --locked --workspace --all-features --fail-under-lines 70
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y ffmpeg
+
+      - name: Pruebas con cobertura y FFmpeg real (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/qa
+          cargo llvm-cov --locked --workspace --all-features --fail-under-lines 90 \
+            --lcov --output-path target/qa/lcov.info -- --include-ignored 2>&1 | tee target/qa/coverage.log
+
+      - name: Probar ejemplos y controles de la TUI (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --examples --all-features
+          cargo build --locked --bin cbrec
+          python3 scripts/test_tui_pty.py target/debug/cbrec 2>&1 | tee target/qa/tui-pty.log
+
+      - name: Conservar informes de QA (Ubuntu)
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-latest' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: qa-linux-${{ github.run_attempt }}
+          path: target/qa/
+          if-no-files-found: warn
+          retention-days: 7
 
   # ─────────────────────────────────────────────────────────
   # 2. AUDIT — verifica vulnerabilidades en dependencias
   # ─────────────────────────────────────────────────────────
   audit:
     name: Security Audit
+    needs: preflight
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Setup Rust (stable)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -175,6 +244,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Setup Rust (stable + target)
         uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # stable
@@ -184,32 +255,6 @@ jobs:
 
       - name: Rust cache
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-
-      # ── Verificar que el tag coincide con Cargo.toml ──────
-      - name: Verify tag vs Cargo.toml (bash)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os != 'Windows'
-        shell: bash
-        run: |
-          set -euo pipefail
-          tag="${{ github.ref_name }}"
-          ver="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)"
-          if [[ "v${ver}" != "${tag}" ]]; then
-            echo "ERROR: Tag (${tag}) != Cargo.toml version (v${ver})"
-            exit 1
-          fi
-
-      - name: Verify tag vs Cargo.toml (pwsh)
-        if: startsWith(github.ref, 'refs/tags/v') && runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tag = "${{ github.ref_name }}"
-          $ver = (Select-String -Path Cargo.toml -Pattern '^\s*version\s*=\s*"' |
-                  Select-Object -First 1).Line
-          $ver = ($ver -split '"')[1]
-          if ("v$ver" -ne $tag) {
-            Write-Error "ERROR: Tag ($tag) != Cargo.toml version (v$ver)"
-            exit 1
-          }
 
       # ── Build release ─────────────────────────────────────
       - name: Build (release)
@@ -262,8 +307,16 @@ jobs:
           "dist/${{ matrix.dist_prefix }}" --version
           test -s "dist/${{ matrix.dist_prefix }}.deb"
           test -s "dist/${{ matrix.dist_prefix }}.rpm"
-          dpkg-deb --contents "dist/${{ matrix.dist_prefix }}.deb" | grep -q './usr/bin/cbrec'
-          rpm -qpl "dist/${{ matrix.dist_prefix }}.rpm" | grep -q '/usr/bin/cbrec'
+          dpkg-deb --contents "dist/${{ matrix.dist_prefix }}.deb" | grep './usr/bin/cbrec'
+          rpm -qpl "dist/${{ matrix.dist_prefix }}.rpm" | grep '/usr/bin/cbrec'
+          tmp="$(mktemp -d)"
+          trap 'rm -rf "$tmp"' EXIT
+          dpkg-deb --extract "dist/${{ matrix.dist_prefix }}.deb" "$tmp"
+          cmp "dist/${{ matrix.dist_prefix }}" "$tmp/usr/bin/cbrec"
+          version="$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)"
+          test "$("$tmp/usr/bin/cbrec" --version)" = "cbrec ${version}"
+          test "$(dpkg-deb --field "dist/${{ matrix.dist_prefix }}.deb" Version)" = "$version"
+          dpkg-deb --field "dist/${{ matrix.dist_prefix }}.deb" Depends | grep -E '(^|, *)ffmpeg([ (,]|$)'
 
       # ── Package: macOS (.tar.gz) ──────────────────────────
       - name: Package macOS
@@ -369,6 +422,7 @@ jobs:
 
           # Generar .msi
           cargo wix --target ${{ matrix.target }} --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "cargo wix failed" }
 
           $msi = Get-ChildItem `
             -Path @("target\${{ matrix.target }}\wix", "target\wix") `
@@ -384,16 +438,19 @@ jobs:
           $ErrorActionPreference = "Stop"
 
           & "dist\${{ matrix.dist_prefix }}.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "Standalone cbrec smoke test failed" }
           if (-not (Test-Path "dist\${{ matrix.dist_prefix }}.msi")) {
             throw "MSI artifact not found"
           }
 
-          $smokeDir = "dist\smoke-portable"
+          $smokeDir = Join-Path $env:RUNNER_TEMP "cbrec-smoke-portable"
           Remove-Item $smokeDir -Recurse -Force -ErrorAction SilentlyContinue
           Expand-Archive "dist\${{ matrix.dist_prefix }}-portable.zip" `
             -DestinationPath $smokeDir -Force
           & "$smokeDir\cbrec.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw "cbrec smoke test failed" }
           & "$smokeDir\ffmpeg.exe" -version
+          if ($LASTEXITCODE -ne 0) { throw "FFmpeg smoke test failed" }
           if (-not (Test-Path "$smokeDir\THIRD_PARTY_NOTICES.md")) {
             throw "THIRD_PARTY_NOTICES.md not found in portable zip"
           }
@@ -404,6 +461,7 @@ jobs:
           name: dist-${{ matrix.dist_prefix }}
           path: dist/*
           if-no-files-found: error
+          compression-level: 0
 
       - name: Attest dist artifacts
         if: startsWith(github.ref, 'refs/tags/v')
@@ -429,6 +487,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
 
       - name: Generate PKGBUILD from template
         shell: bash
@@ -437,6 +497,7 @@ jobs:
         run: |
           set -euo pipefail
           VER="${VERSION#v}"
+          PKGVER="${VER//-/_}"
           URL="https://github.com/Duna-tools/cbrec/archive/refs/tags/v${VER}.tar.gz"
 
           # Descargar el tarball para calcular el checksum real
@@ -445,7 +506,8 @@ jobs:
 
           mkdir -p dist
           sed \
-            -e "s/@@VERSION@@/${VER}/g" \
+            -e "s/@@VERSION@@/${PKGVER}/g" \
+            -e "s/@@SOURCE_VERSION@@/${VER}/g" \
             -e "s/@@SHA256@@/${SHA}/g" \
             -e "s|@@URL@@|${URL}|g" \
             packaging/arch/PKGBUILD.template > dist/PKGBUILD
@@ -481,6 +543,11 @@ jobs:
       id-token: write
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
       - name: Download all dist artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -492,8 +559,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python3 scripts/check_release.py dist
           cd dist
-          sha256sum -- ./* > SHA256SUMS
+          sha256sum -c SHA256SUMS
           cat SHA256SUMS
 
       - name: Attest SHA256SUMS
@@ -559,6 +627,8 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
+          prerelease: ${{ contains(github.ref_name, '-beta.') || contains(github.ref_name, '-rc.') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           body_path: release_notes.md
           files: dist/*
           fail_on_unmatched_files: true

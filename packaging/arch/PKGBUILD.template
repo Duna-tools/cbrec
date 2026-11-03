@@ -1,5 +1,6 @@
 pkgname=cbrec
 pkgver=@@VERSION@@
+_source_version=@@SOURCE_VERSION@@
 pkgrel=1
 pkgdesc="Simple and efficient stream recorder for Chaturbate"
 arch=('x86_64' 'aarch64')
@@ -11,26 +12,26 @@ source=("${pkgname}-${pkgver}.tar.gz::@@URL@@")
 sha256sums=('@@SHA256@@')
 
 prepare() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgname}-${_source_version}"
     export RUSTUP_TOOLCHAIN=stable
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
 }
 
 build() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgname}-${_source_version}"
     export RUSTUP_TOOLCHAIN=stable
     export CARGO_TARGET_DIR=target
     cargo build --release --locked
 }
 
 check() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgname}-${_source_version}"
     export RUSTUP_TOOLCHAIN=stable
     cargo test --locked
 }
 
 package() {
-    cd "${pkgname}-${pkgver}"
+    cd "${pkgname}-${_source_version}"
     install -Dm755 "target/release/${pkgname}" "${pkgdir}/usr/bin/${pkgname}"
     install -Dm644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
     install -Dm644 LICENSE   "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"

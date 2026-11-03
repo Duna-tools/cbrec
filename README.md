@@ -1,5 +1,12 @@
 # cbrec
 
+[![CI estable](https://github.com/Duna-tools/cbrec/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Duna-tools/cbrec/actions?query=branch%3Amain)
+[![CI beta](https://github.com/Duna-tools/cbrec/actions/workflows/ci.yml/badge.svg?branch=beta)](https://github.com/Duna-tools/cbrec/actions?query=branch%3Abeta)
+
+**Canales:** [`main`](https://github.com/Duna-tools/cbrec/tree/main) es estable;
+[`beta`](https://github.com/Duna-tools/cbrec/tree/beta) contiene las mejoras en prueba.
+[Contribuir](CONTRIBUTING.md) · [Ramas y releases](docs/development.md) · [Cambios](CHANGELOG.md) · [Seguridad](SECURITY.md)
+
 Simple, efficient, low-resource stream recorder written in Rust.
 
 Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
@@ -54,7 +61,7 @@ Usa `cbrec --help` para ver todas las opciones. Las grabaciones se guardan bajo
 | FFmpeg flexible | PATH, `--ffmpeg-path`, `CBREC_FFMPEG` o paquete Windows con FFmpeg incluido |
 | Shutdown limpio | Ctrl+C detiene grabaciones activas correctamente |
 | Salida estructurada | `--json` para `check` y `discover`; metadatos junto a cada grabación |
-| Interfaz opcional | Explorador terminal por tag con `cbrec tui --tag <tag>` |
+| Interfaz opcional | Inicio, búsqueda, miniaturas y grabación con `cbrec tui` |
 
 ### Instalación
 
@@ -120,6 +127,10 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec nombremodelo
 ```
 
 La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
+
+Las nuevas grabaciones se escriben directamente en un `.mp4` fragmentado, sin crear vídeos `.part.mp4`. Se copian audio y vídeo sin recodificar. Los fragmentos se guardan periódicamente para reducir la memoria de FFmpeg y conservar contenido legible ante una interrupción. Algunos editores pueden tener menor compatibilidad con MP4 fragmentado.
+
+Si ocurre un fallo, se conserva el archivo con datos y se informa su ruta. Su JSON usa `classification: "interrupted"`; el comando sigue notificando el fallo y `watch` aplica su pausa antes de reintentar con otro nombre. Un archivo que aún no tiene JSON no debe considerarse terminado. Las grabaciones menores al umbral se trasladan a `small/`, no se eliminan. Los `.part.mp4` anteriores se respetan y no se convierten automáticamente.
 
 Cada grabación final crea un sidecar `archivo.mp4.json` con esquema v1, modelo, calidad solicitada, tiempos UTC, tamaño y clasificación. No almacena la URL del stream ni cookies.
 
@@ -191,13 +202,27 @@ cbrec discover --tag gaming --limit 5
 cbrec check alice --json
 cbrec discover --tag gaming --json
 
-# Explorador TUI opcional; salir con q o Esc
+# Panel TUI: inicio, búsqueda y grabación en segundo plano
+cbrec tui
 cbrec tui --tag gaming
 
 # Ver ayuda
 cbrec --help
 cbrec watch --help
 ```
+
+### Panel interactivo
+
+`Enter` explora o entra en una sala; `o` abre vídeo y chat en el navegador;
+`r` graba, `s` detiene y `g` muestra las grabaciones activas. `a` conecta una
+sesión temporal, `t` carga la miniatura, `+`/`-` hacen zoom y `f` amplía el panel.
+El chat utiliza la sesión del navegador; la grabación, la sesión recibida por cbrec.
+Las miniaturas conservan su resolución y usan gráficos del terminal cuando hay
+soporte. Hay botones, selección con clic y navegación con rueda, además del teclado.
+La detección automática consulta Kitty clásico y muestra píxeles reales cuando
+el terminal responde. Verificado en Konsole 26.08.2; no hace falta cambiar de terminal.
+`CBREC_IMAGE_PROTOCOL=text cbrec tui` conserva el modo de compatibilidad con detalle limitado.
+Consulta [la guía del panel](docs/tui.md) para los controles y límites.
 
 ### Autenticación
 
@@ -230,9 +255,9 @@ Cómo obtener la cookie:
 1. Inicia sesión en `chaturbate.com` en tu navegador.
 2. Abre DevTools con F12.
 3. Ve a **Application** > **Cookies** > `https://chaturbate.com`.
-4. Copia los valores de `PHPSESSID` y `chaturbatesid`.
+4. Copia `sessionid` si está presente. También se admiten `PHPSESSID` y `chaturbatesid` para sesiones que los utilicen.
 
-La cookie funciona para `watch`, `record` y `check`.
+La cookie se usa para consultar el contexto de la sala en `watch`, `record` y `check`. No se envía a las playlists multimedia ni a FFmpeg: estos usan la URL autorizada devuelta por el sitio. Los streams que exijan reenviar la cookie de la cuenta al servidor multimedia no están soportados; una cookie no concede acceso que la cuenta no tenga.
 
 #### Sesión temporal con Violentmonkey
 
@@ -262,7 +287,7 @@ incógnito o privado cuando corresponda.
 
 ### Configuración
 
-Archivo: `~/.config/cbrec/config.toml`
+Archivo en Linux: `~/.config/cbrec/config.toml`. `CBREC_CONFIG_DIR` permite elegir otro directorio para `config.toml` y `watched.toml` en cualquier plataforma.
 
 ```toml
 [general]
@@ -317,7 +342,10 @@ cargo build --release
 ```
 
 El CI ejecuta además las pruebas en Linux, macOS y Windows, auditoría de
-dependencias y cobertura en Linux.
+dependencias y cobertura en Linux. Incluye una grabación sintética con FFmpeg/ffprobe,
+valida el inventario completo antes de publicar y repite los controles semanalmente.
+Las pruebas HTTP requieren poder abrir puertos en localhost; si no pueden, fallan explícitamente.
+Para ejecutar la prueba multimedia local: `cargo test ffmpeg_smoke_records_playable_timed_clip -- --ignored`.
 
 #### Publicar una release
 
@@ -408,7 +436,7 @@ Use `cbrec --help` to see all options. Recordings are stored under
 | Flexible FFmpeg | PATH, `--ffmpeg-path`, `CBREC_FFMPEG`, or Windows package with FFmpeg included |
 | Clean shutdown | Ctrl+C stops active recordings properly |
 | Structured output | `--json` for `check` and `discover`; metadata beside every recording |
-| Optional interface | Terminal tag browser with `cbrec tui --tag <tag>` |
+| Optional interface | Home, search, thumbnails and recording with `cbrec tui` |
 
 ### Installation
 
@@ -474,6 +502,10 @@ CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec modelname
 ```
 
 The default quality is `best`: cbrec resolves the highest available variant and records that direct URL. When `--duration` is used, the output is treated as an explicit clip and is not marked as a "small file" by the normal long-recording threshold.
+
+New recordings are written directly to fragmented `.mp4` files without creating `.part.mp4` videos. Audio and video are copied without re-encoding. Periodically flushed fragments reduce FFmpeg memory use and retain readable content after an interruption. Some editors may have lower compatibility with fragmented MP4.
+
+Failures preserve nonempty recordings and report their paths. Their JSON uses `classification: "interrupted"`; the command still reports failure and `watch` applies its cooldown before retrying with another name. A file without JSON must not be considered finished. Recordings below the size threshold are moved to `small/`, not deleted. Existing `.part.mp4` files are preserved and are not automatically converted.
 
 Each completed recording creates a `file.mp4.json` sidecar with schema v1, model, requested quality, UTC timestamps, size, and classification. Stream URLs and cookies are not stored.
 
@@ -542,7 +574,8 @@ cbrec discover --tag gaming --limit 5
 cbrec check alice --json
 cbrec discover --tag gaming --json
 
-# Optional TUI browser; quit with q or Esc
+# Interactive home and background recording
+cbrec tui
 cbrec tui --tag gaming
 
 # Show help
@@ -581,9 +614,9 @@ How to get the cookie:
 1. Log in to `chaturbate.com` in your browser.
 2. Open DevTools with F12.
 3. Go to **Application** > **Cookies** > `https://chaturbate.com`.
-4. Copy the values for `PHPSESSID` and `chaturbatesid`.
+4. Copy `sessionid` if present. `PHPSESSID` and `chaturbatesid` are also supported for sessions that use them.
 
-The cookie works for `watch`, `record`, and `check`.
+The cookie authenticates room-context requests for `watch`, `record`, and `check`. It is not forwarded to media playlists or FFmpeg, which use the authorized URL returned by the site. Streams requiring the account cookie at the media server are unsupported; a cookie cannot grant access the account does not have.
 
 #### Temporary session with Violentmonkey
 
@@ -612,7 +645,7 @@ extension must also be allowed in incognito or private mode when applicable.
 
 ### Configuration
 
-File: `~/.config/cbrec/config.toml`
+Linux file: `~/.config/cbrec/config.toml`. Set `CBREC_CONFIG_DIR` to choose another directory for `config.toml` and `watched.toml` on any platform.
 
 ```toml
 [general]
@@ -667,7 +700,10 @@ cargo build --release
 ```
 
 CI also runs tests on Linux, macOS, and Windows, dependency auditing, and Linux
-coverage checks.
+coverage checks. It records a synthetic clip using FFmpeg/ffprobe, validates the complete
+release inventory before publishing, and reruns checks weekly. HTTP tests require
+localhost sockets and fail explicitly when unavailable.
+Run the local media check with `cargo test ffmpeg_smoke_records_playable_timed_clip -- --ignored`.
 
 #### Publish a release
 

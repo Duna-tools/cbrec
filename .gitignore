@@ -39,3 +39,10 @@ codedb.snapshot
 
 # Documentation
 doc/
+
+# Caché de las pruebas Python de release
+__pycache__/
+
+# Informes de herramientas y planificación local
+/mutants.out*/
+/tasks/

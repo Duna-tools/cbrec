@@ -43,11 +43,13 @@ Out of scope:
 | Invalid model input or pasted URLs | Central model normalization through `ModelName` |
 | Bad config causing tight loops or disabled recording | Config normalization with warnings |
 | Broken local environment | `cbrec doctor` checks FFmpeg, output, watchlist, and auth state |
-| File overwrite or partial collision | Recording preflight reserves `.part` files and suffixes colliding outputs |
-| Stalled recordings | FFmpeg is cancelled when the output file stops growing |
-| Corrupt cancelled MP4s | Cancelled partial files stay as `.part` instead of being promoted as saved recordings |
+| File overwrite or partial collision | La reserva exclusiva del `.mp4` evita colisiones; también se respetan metadatos y parciales antiguos |
+| Stalled recordings | Se detiene FFmpeg si el archivo deja de crecer; se conserva el vídeo con datos y se registra como interrumpido |
+| Watch shutdown | Waits for recording tasks to close FFmpeg and finalize media and metadata |
+| Corrupt cancelled MP4s | MP4 fragmentado con vaciado de buffers; las interrupciones se distinguen de las grabaciones correctas en el JSON |
 | FFmpeg path missing or broken | FFmpeg validation before recording |
 | FFmpeg stderr leaking cookies | Cookie-looking stderr lines are redacted |
+| Cookie forwarded to media servers or FFmpeg | Account cookies are used only for room-context requests; multimedia downloads use the returned URL and FFmpeg does not inherit `CBREC_SESSION_COOKIE` |
 | CLI cookie exposure | `CBREC_SESSION_COOKIE` and config input are documented; CLI cookie use emits a warning |
 | Chaturbate status changes | HTTP status classification and contract tests |
 | Playlist response drift | M3U8 header validation and playlist contract tests |
@@ -59,7 +61,9 @@ Out of scope:
 ## Residual Risks
 
 - Session cookies passed on the command line may be visible in shell history or process listings.
-- Chaturbate can change API response shape, access controls, anti-bot behavior, or playlist structure.
+- Chaturbate can change API response shape, access controls, anti-bot behavior, or playlist structure. Media servers requiring an account cookie instead of the returned authorized URL are unsupported.
+- La validación exige límites válidos de las cajas MP4, `moov` y `mdat` con datos; no demuestra decodificación completa. Un corte puede perder el fragmento aún no persistido. Sin JSON, el archivo no se considera confirmado. MP4 fragmentado tiene menor compatibilidad con algunos editores.
+- Stream URLs can contain access tokens and remain visible in FFmpeg process arguments.
 - FFmpeg is a large native dependency; cbrec validates execution but does not sandbox FFmpeg.
 - CI runners are trusted for release builds.
 - Checksums prove integrity after release publication; artifact attestations add build provenance but still trust GitHub-hosted runners.

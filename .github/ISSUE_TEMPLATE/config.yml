@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Vulnerabilidad de seguridad
+    url: https://github.com/Duna-tools/cbrec/security/advisories/new
+    about: Usa este canal privado y evita publicar credenciales en issues.

@@ -36,6 +36,9 @@ Authenticated requests require session cookies. State-changing POST requests als
 - POST body field: `csrfmiddlewaretoken=<token>`
 
 ### Cookies
+
+The cbrec browser bridge accepts `sessionid`, `PHPSESSID`, and `chaturbatesid`. It does not import every cookie in this historical map. Account cookies authenticate room-context requests only and are not forwarded to multimedia servers or FFmpeg.
+
 | Cookie | Source | Purpose |
 |---|---|---|
 | `sessionid` | Login | Session auth |

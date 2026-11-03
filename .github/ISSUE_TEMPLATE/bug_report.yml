@@ -1,0 +1,31 @@
+name: Informe de error
+description: Describe un fallo reproducible sin compartir datos privados.
+title: "bug: "
+body:
+  - type: markdown
+    attributes:
+      value: No adjuntes cookies, URLs firmadas, sesiones, grabaciones ni datos personales. Para vulnerabilidades usa el canal privado de Security.
+  - type: input
+    id: version
+    attributes:
+      label: Versión o commit
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Sistema operativo y terminal
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Pasos y resultado observado
+      description: Incluye el resultado esperado y un ejemplo sintético.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidencia revisada
+      description: Comparte solo logs sanitizados, sin rutas personales ni credenciales.
