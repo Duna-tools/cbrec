@@ -186,7 +186,7 @@ fn version_ffmpeg(salida: &[u8]) -> Option<String> {
     Some(version)
 }
 
-fn is_chaturbate_host(host: &str) -> bool {
+pub(crate) fn is_chaturbate_host(host: &str) -> bool {
     let host = host.to_ascii_lowercase();
     host == "chaturbate.com" || host.ends_with(".chaturbate.com")
 }

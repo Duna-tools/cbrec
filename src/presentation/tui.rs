@@ -5,14 +5,16 @@ use crate::presentation::output::sanitize_external_text;
 use crate::presentation::thumbnail::{PreviewRenderer, BACKGROUND};
 use image::DynamicImage;
 use ratatui::crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::crossterm::execute;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, BorderType, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui::Frame;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -39,7 +41,8 @@ impl TuiRoom {
 }
 
 pub(crate) enum TuiAction {
-    Search(String),
+    Search(String, usize, u64),
+    CancelSession,
     Preview(String),
     RefreshPreview(String),
     OpenRoom(String),
@@ -50,8 +53,23 @@ pub(crate) enum TuiAction {
     Quit,
 }
 
+pub(crate) struct TuiPage {
+    pub rooms: Vec<TuiRoom>,
+    pub total: Option<usize>,
+    pub has_more: bool,
+}
+
+const BROWSERS: &[&str] = &[
+    "Firefox",
+    "Chrome",
+    "Chromium",
+    "Edge",
+    "Brave",
+    "Otro navegador",
+];
+
 pub(crate) enum TuiEvent {
-    Rooms(String, Result<Vec<TuiRoom>, String>),
+    Rooms(String, usize, u64, Result<TuiPage, String>),
     Preview(String, Result<Arc<DynamicImage>, String>),
     Recording(String, PathBuf),
     Progress(String, u64),
@@ -63,6 +81,7 @@ pub(crate) enum TuiEvent {
 
 pub(crate) struct TuiInitial {
     pub tag: String,
+    pub page_size: usize,
     pub session_present: bool,
     pub max_recordings: usize,
     pub quality: VideoQuality,
@@ -101,23 +120,30 @@ struct DiscoveryTui {
     output_folder: PathBuf,
     buttons: Vec<(Rect, KeyCode)>,
     room_rows: Vec<(Rect, usize)>,
+    offset: usize,
+    page_size: usize,
+    total: Option<usize>,
+    has_more: bool,
+    session_picker: Option<usize>,
+    session_browser: usize,
+    session_pending: bool,
+    last_request: (String, usize),
+    search_generation: u64,
 }
 
 impl DiscoveryTui {
     fn new(initial: TuiInitial) -> Self {
         Self {
-            query: if initial.tag.is_empty() {
-                "gaming".into()
-            } else {
-                initial.tag.clone()
-            },
+            search_generation: 0,
+            last_request: (initial.tag.clone(), 0),
+            query: initial.tag.clone(),
             tag: initial.tag,
             screen: Screen::Home,
             rooms: Vec::new(),
             selected: 0,
             editing: false,
             loading: false,
-            notice: "Enter: explorar · /: cambiar tag · l: abrir sitio · a: conectar sesión".into(),
+            notice: "/: buscar por #tag, @usuario o URL · a: conectar sesión".into(),
             session_present: initial.session_present,
             session_url: None,
             active: BTreeMap::new(),
@@ -133,6 +159,13 @@ impl DiscoveryTui {
             output_folder: initial.output_folder,
             buttons: Vec::new(),
             room_rows: Vec::new(),
+            offset: 0,
+            page_size: initial.page_size,
+            total: None,
+            has_more: false,
+            session_picker: None,
+            session_browser: 0,
+            session_pending: false,
         }
     }
 
@@ -161,7 +194,7 @@ impl DiscoveryTui {
     }
 
     fn request_preview(&mut self, refresh: bool) -> Option<TuiAction> {
-        if !matches!(self.screen, Screen::Browse | Screen::Room) {
+        if self.screen == Screen::Recordings {
             return None;
         }
         let model = self.selected_model()?;
@@ -186,6 +219,27 @@ impl DiscoveryTui {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return self.request_quit();
         }
+        if self.session_pending {
+            if key.code == KeyCode::Esc {
+                self.session_pending = false;
+                self.session_url = None;
+                return Some(TuiAction::CancelSession);
+            }
+            return None;
+        }
+        if let Some(selected) = self.session_picker {
+            match key.code {
+                KeyCode::Esc => self.session_picker = None,
+                KeyCode::Up => self.session_picker = Some(selected.saturating_sub(1)),
+                KeyCode::Down => self.session_picker = Some((selected + 1).min(BROWSERS.len() - 1)),
+                KeyCode::Enter => return self.connect_session(selected),
+                KeyCode::Char(c) if ('1'..='6').contains(&c) => {
+                    return self.connect_session(c as usize - '1' as usize)
+                }
+                _ => {}
+            }
+            return None;
+        }
         if self.editing {
             match key.code {
                 KeyCode::Esc => self.editing = false,
@@ -199,13 +253,7 @@ impl DiscoveryTui {
                 KeyCode::Backspace => {
                     self.query.pop();
                 }
-                KeyCode::Char(character)
-                    if self.query.len() < 50
-                        && (character.is_ascii_alphanumeric()
-                            || matches!(character, '_' | '-' | '#')) =>
-                {
-                    self.query.push(character)
-                }
+                KeyCode::Char(character) => self.append_query(&character.to_string()),
                 _ => {}
             }
             return None;
@@ -216,11 +264,13 @@ impl DiscoveryTui {
         match key.code {
             KeyCode::Char('q') => self.request_quit(),
             KeyCode::Esc => {
-                if self.screen == Screen::Room {
+                if self.screen == Screen::Home && self.focused {
+                    self.focused = false;
+                } else if self.screen == Screen::Room {
                     self.screen = Screen::Browse;
                     self.focused = false;
                 } else if matches!(self.screen, Screen::Browse | Screen::Recordings) {
-                    self.screen = Screen::Home;
+                    return self.home();
                 } else {
                     return self.request_quit();
                 }
@@ -231,17 +281,13 @@ impl DiscoveryTui {
                 self.selected = 0;
                 None
             }
-            KeyCode::Char('h') => {
-                self.screen = Screen::Home;
-                self.focused = false;
-                None
-            }
+            KeyCode::Char('h') => self.home(),
+            KeyCode::Char('p') => self.home(),
             KeyCode::Char('/') => {
                 self.editing = true;
-                self.screen = Screen::Home;
                 None
             }
-            KeyCode::Enter if self.screen == Screen::Home => self.search(),
+            KeyCode::Enter if self.screen == Screen::Home && self.rooms.is_empty() => self.search(),
             KeyCode::Enter if self.screen != Screen::Recordings => {
                 self.screen = Screen::Room;
                 self.request_preview(false)
@@ -291,7 +337,13 @@ impl DiscoveryTui {
                 self.selected_model().map(TuiAction::OpenRoom)
             }
             KeyCode::Char('l') => Some(TuiAction::OpenSite),
-            KeyCode::Char('a') if self.session_url.is_none() => Some(TuiAction::ConnectSession),
+            KeyCode::Char('a') => {
+                self.session_picker = Some(self.session_browser);
+                self.editing = false;
+                None
+            }
+            KeyCode::PageDown | KeyCode::Char(']') => self.change_page(true),
+            KeyCode::PageUp | KeyCode::Char('[') => self.change_page(false),
             KeyCode::Char('t') if self.screen != Screen::Home => self.request_preview(true),
             KeyCode::Char('r') if self.screen != Screen::Home => self
                 .selected_model()
@@ -306,9 +358,10 @@ impl DiscoveryTui {
                     VideoQuality::P480 => VideoQuality::AudioOnly,
                     _ => VideoQuality::Best,
                 };
+                self.notice = format!("Calidad para las próximas grabaciones: {}", self.quality);
                 None
             }
-            KeyCode::Char('f') if matches!(self.screen, Screen::Browse | Screen::Room) => {
+            KeyCode::Char('f') if self.screen != Screen::Recordings => {
                 self.focused = !self.focused;
                 None
             }
@@ -320,7 +373,11 @@ impl DiscoveryTui {
                 self.zoom = self.zoom.saturating_sub(1).max(1);
                 None
             }
-            KeyCode::Char('R') => self.search(),
+            KeyCode::Char('R') => self.load(
+                self.last_request.0.clone(),
+                self.last_request.1,
+                self.screen,
+            ),
             _ => None,
         }
     }
@@ -338,6 +395,9 @@ impl DiscoveryTui {
                     self.editing = false;
                     return self.handle_key(KeyEvent::new(code, KeyModifiers::NONE));
                 }
+                if self.session_picker.is_some() || self.session_pending {
+                    return None;
+                }
                 if let Some((_, index)) = self
                     .room_rows
                     .iter()
@@ -350,10 +410,14 @@ impl DiscoveryTui {
                 }
                 None
             }
-            MouseEventKind::ScrollDown if !self.editing && self.screen != Screen::Home => {
+            MouseEventKind::ScrollDown
+                if !self.editing && self.session_picker.is_none() && !self.session_pending =>
+            {
                 self.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
             }
-            MouseEventKind::ScrollUp if !self.editing && self.screen != Screen::Home => {
+            MouseEventKind::ScrollUp
+                if !self.editing && self.session_picker.is_none() && !self.session_pending =>
+            {
                 self.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
             }
             _ => None,
@@ -373,30 +437,95 @@ impl DiscoveryTui {
         }
     }
 
+    fn append_query(&mut self, text: &str) {
+        for c in text
+            .chars()
+            .filter(|c| c.is_ascii() && !c.is_ascii_control())
+        {
+            if self.query.len() >= 512 {
+                break;
+            }
+            self.query.push(c);
+        }
+    }
+
+    fn connect_session(&mut self, browser: usize) -> Option<TuiAction> {
+        self.session_browser = browser;
+        self.session_picker = None;
+        self.session_pending = true;
+        self.notice = format!("Esperando la sesión desde {}…", BROWSERS[browser]);
+        Some(TuiAction::ConnectSession)
+    }
+
+    fn home(&mut self) -> Option<TuiAction> {
+        self.focused = false;
+        self.query.clear();
+        self.load(String::new(), 0, Screen::Home)
+    }
+
     fn search(&mut self) -> Option<TuiAction> {
-        if self.loading {
+        self.load(self.query.clone(), 0, Screen::Browse)
+    }
+
+    fn load(&mut self, query: String, offset: usize, screen: Screen) -> Option<TuiAction> {
+        self.last_request = (query.clone(), offset);
+        self.search_generation = self.search_generation.wrapping_add(1);
+        self.loading = true;
+        self.focused = false;
+        self.screen = screen;
+        self.notice =
+            "Cargando salas… /: otra búsqueda · se conservan los resultados si falla".into();
+        Some(TuiAction::Search(query, offset, self.search_generation))
+    }
+
+    fn change_page(&mut self, next: bool) -> Option<TuiAction> {
+        if self.loading || self.screen == Screen::Recordings {
             return None;
         }
-        self.loading = true;
-        self.screen = Screen::Browse;
-        self.notice = "Buscando salas…".into();
-        Some(TuiAction::Search(self.query.clone()))
+        let offset = if next {
+            if !self.has_more {
+                return None;
+            }
+            self.offset.checked_add(self.page_size)?
+        } else {
+            if self.offset == 0 {
+                return None;
+            }
+            self.offset.saturating_sub(self.page_size)
+        };
+        let screen = if self.screen == Screen::Room {
+            Screen::Browse
+        } else {
+            self.screen
+        };
+        self.load(self.tag.clone(), offset, screen)
     }
 
     fn update(&mut self, event: TuiEvent) {
         match event {
-            TuiEvent::Rooms(tag, result) => {
+            TuiEvent::Rooms(tag, offset, generation, result) => {
+                if generation != self.search_generation {
+                    return;
+                }
                 self.loading = false;
                 match result {
-                    Ok(rooms) => {
+                    Ok(page) => {
                         self.tag = tag;
-                        self.rooms = rooms;
-                        self.selected = 0;
+                        self.offset = offset;
+                        self.total = page.total;
+                        self.has_more = page.has_more;
+                        self.rooms = page.rooms;
+                        if self.screen != Screen::Recordings {
+                            self.selected = 0;
+                        }
                         self.preview = None;
                         self.preview_pending = false;
                         self.preview_error = None;
                         self.notice = if self.rooms.is_empty() {
-                            "Sin resultados. /: cambiar tag · R: reintentar".into()
+                            "Sin resultados. /: cambiar búsqueda · R: reintentar".into()
+                        } else if self.screen == Screen::Home {
+                            "Enter: entrar en la sala · PgUp/PgDn: página · /: buscar · a: sesión"
+                                .into()
                         } else {
                             "Enter: sala · o: vídeo y chat · r: grabar · t: miniatura".into()
                         };
@@ -436,11 +565,13 @@ impl DiscoveryTui {
                 self.notice = message;
             }
             TuiEvent::SessionUrl(url) => {
-                self.session_url = Some(url);
-                self.screen = Screen::Home;
+                if self.session_pending {
+                    self.session_url = Some(url);
+                }
             }
             TuiEvent::SessionFinished(present, message) => {
                 self.session_url = None;
+                self.session_pending = false;
                 self.session_present = present;
                 self.notice = message;
             }
@@ -453,7 +584,11 @@ struct MouseCaptureGuard;
 
 impl Drop for MouseCaptureGuard {
     fn drop(&mut self) {
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableMouseCapture,
+            DisableBracketedPaste
+        );
     }
 }
 
@@ -463,12 +598,15 @@ pub(crate) fn run_discovery_tui(
     mut events: mpsc::Receiver<TuiEvent>,
 ) -> anyhow::Result<()> {
     let mut app = DiscoveryTui::new(initial);
-    if !app.tag.is_empty() {
-        if let Some(action) = app.search() {
-            commands
-                .try_send(action)
-                .map_err(|_| anyhow::anyhow!("No se pudo iniciar la búsqueda"))?;
-        }
+    let action = if app.tag.is_empty() {
+        app.home()
+    } else {
+        app.search()
+    };
+    if let Some(action) = action {
+        commands
+            .try_send(action)
+            .map_err(|_| anyhow::anyhow!("No se pudo cargar el catálogo"))?;
     }
     let mut terminal = ratatui::try_init().inspect_err(|_| ratatui::restore())?;
     app.preview_renderer
@@ -476,11 +614,11 @@ pub(crate) fn run_discovery_tui(
         .inspect_err(|_| ratatui::restore())?;
     let result = (|| -> std::io::Result<()> {
         let _mouse_capture = MouseCaptureGuard;
-        execute!(std::io::stdout(), EnableMouseCapture)?;
+        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
         let mut previous_view = None;
         loop {
             while let Ok(event) = events.try_recv() {
-                let discovered = matches!(&event, TuiEvent::Rooms(_, Ok(_)));
+                let discovered = matches!(&event, TuiEvent::Rooms(_, _, generation, Ok(_)) if *generation == app.search_generation);
                 app.update(event);
                 if discovered {
                     if let Some(action) = app.request_preview(false) {
@@ -500,6 +638,9 @@ pub(crate) fn run_discovery_tui(
                 app.focused,
                 app.zoom,
                 app.active.len(),
+                app.session_picker,
+                app.session_pending,
+                app.editing,
                 app.preview.as_ref().map(|(_, pixels)| Arc::as_ptr(pixels)),
                 terminal.size()?,
             );
@@ -525,6 +666,10 @@ pub(crate) fn run_discovery_tui(
                     app.handle_key(key)
                 }
                 Event::Mouse(mouse) => app.handle_mouse(mouse),
+                Event::Paste(text) if app.editing => {
+                    app.append_query(&text);
+                    None
+                }
                 _ => None,
             };
             if let Some(action) = action {
@@ -620,7 +765,7 @@ fn render(frame: &mut Frame, app: &mut DiscoveryTui) {
         header,
     );
     render_toolbar(frame, toolbar, app);
-    if app.screen == Screen::Home {
+    if app.screen == Screen::Home && !app.focused {
         render_home(frame, body, app);
     } else if app.screen == Screen::Recordings {
         let items = app.active.iter().map(|(model, (path, bytes))| {
@@ -663,118 +808,13 @@ fn render(frame: &mut Frame, app: &mut DiscoveryTui) {
             );
         }
     } else {
-        let [rooms_area, detail] = if app.focused {
-            [Rect::default(), body]
-        } else {
-            Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(body)
-        };
-        if !app.focused {
-            let items = app.rooms.iter().map(|room| {
-                ListItem::new(format!(
-                    "{}  ·  {} espectadores",
-                    room.username, room.viewers
-                ))
-            });
-            let list = List::new(items)
-                .block(
-                    Block::default()
-                        .title(format!(" #{} · {} salas ", app.tag, app.rooms.len()))
-                        .borders(Borders::ALL),
-                )
-                .highlight_symbol("> ")
-                .highlight_style(
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .bg(Color::Rgb(30, 48, 58))
-                        .add_modifier(Modifier::BOLD),
-                );
-            let mut selection =
-                ListState::default().with_selected((!app.rooms.is_empty()).then_some(app.selected));
-            frame.render_stateful_widget(list, rooms_area, &mut selection);
-            let inner = Block::bordered().inner(rooms_area);
-            for index in 0..usize::from(inner.height) {
-                let room = selection.offset() + index;
-                if room >= app.rooms.len() {
-                    break;
-                }
-                app.room_rows.push((
-                    Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
-                    room,
-                ));
-            }
-        }
-        let [room_header, preview, description] = Layout::vertical([
-            Constraint::Length(if app.focused { 1 } else { 3 }),
-            Constraint::Min(1),
-            Constraint::Length(if app.focused { 0 } else { 5 }),
+        let [search, catalog] = Layout::vertical([
+            Constraint::Length(if app.focused { 0 } else { 3 }),
+            Constraint::Min(0),
         ])
-        .areas(detail);
-        let info = app
-            .rooms
-            .get(app.selected)
-            .map(|room| {
-                format!(
-                    "{} · {} · {} espectadores\nCalidad: {}",
-                    room.username, room.show, room.viewers, app.quality
-                )
-            })
-            .unwrap_or_else(|| {
-                if app.loading {
-                    "Buscando…".into()
-                } else {
-                    "Sin resultados".into()
-                }
-            });
-        frame.render_widget(
-            Paragraph::new(info).block(Block::default().borders(Borders::ALL)),
-            room_header,
-        );
-        let block = Block::default()
-            .title(format!(
-                " Miniatura [{}] · t: actualizar · +/-: zoom · f: ampliar ",
-                app.preview_renderer.label()
-            ))
-            .borders(Borders::ALL);
-        let inner = block.inner(preview);
-        frame.render_widget(block, preview);
-        if let Some((model, pixels)) = &app.preview {
-            if app.selected_model().as_deref() == Some(model) {
-                app.preview_renderer.render(frame, inner, pixels, app.zoom);
-            } else {
-                frame.render_widget(
-                    Paragraph::new("Pulsa t o Enter para cargar la miniatura"),
-                    inner,
-                );
-            }
-        } else {
-            frame.render_widget(
-                Paragraph::new(if let Some(error) = &app.preview_error {
-                    format!(
-                        "No se pudo cargar la miniatura: {}\nPulsa t para reintentar.",
-                        sanitize_external_text(error)
-                    )
-                } else if app.preview_pending {
-                    "Cargando miniatura…".into()
-                } else {
-                    "Pulsa t o Enter para cargar la miniatura".into()
-                })
-                .wrap(Wrap { trim: true }),
-                inner,
-            );
-        }
-        let subject = app
-            .rooms
-            .get(app.selected)
-            .map(|room| room.subject.as_str())
-            .unwrap_or("Cambia el tag con / o reintenta con R");
-        frame.render_widget(
-            Paragraph::new(subject).wrap(Wrap { trim: true }).block(
-                Block::default()
-                    .title(" Descripción ")
-                    .borders(Borders::ALL),
-            ),
-            description,
-        );
+        .areas(body);
+        render_search(frame, search, app);
+        render_catalog(frame, catalog, app);
     }
     if !app.active.is_empty() {
         let text = app
@@ -800,13 +840,194 @@ fn render(frame: &mut Frame, app: &mut DiscoveryTui) {
             .block(Block::default().title(" Estado ").borders(Borders::ALL)),
         notice,
     );
-    frame.render_widget(Paragraph::new("↑/↓: sala  Enter: entrar  o: vídeo/chat  r: grabar  s: parar  c: calidad\nh: inicio  g: grabaciones  /: buscar  a: sesión  f: ampliar  q: salir"), footer);
+    frame.render_widget(Paragraph::new("↑/↓: sala  Enter: entrar  o: vídeo/chat  r: grabar  s: parar\nh: inicio  g: grabaciones  /: buscar  a: sesión  PgUp/PgDn: página  q: salir"), footer);
+    if app.session_picker.is_some() || app.session_pending {
+        render_session(frame, app);
+    }
+}
+
+fn render_catalog(frame: &mut Frame, body: Rect, app: &mut DiscoveryTui) {
+    let [catalog, pagination] =
+        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
+    let mut x = pagination.x;
+    for (label, code, enabled) in [
+        ("[ Anterior", KeyCode::PageUp, app.offset > 0),
+        ("] Siguiente", KeyCode::PageDown, app.has_more),
+    ] {
+        let width = label.chars().count() as u16 + 2;
+        if x.saturating_add(width) <= pagination.right() && pagination.height > 0 {
+            let area = Rect::new(x, pagination.y, width, 1);
+            frame.render_widget(
+                Paragraph::new(format!(" {label} ")).style(Style::default().fg(
+                    if enabled && !app.loading {
+                        Color::Cyan
+                    } else {
+                        Color::DarkGray
+                    },
+                )),
+                area,
+            );
+            if enabled && !app.loading {
+                app.buttons.push((area, code));
+            }
+            x = x.saturating_add(width + 1);
+        }
+    }
+    frame.render_widget(
+        Paragraph::new(format!(
+            "Página {}{}{}",
+            app.offset / app.page_size + 1,
+            app.total
+                .map(|total| format!(
+                    " de {} · {total} salas",
+                    total.div_ceil(app.page_size).max(1)
+                ))
+                .unwrap_or_default(),
+            if app.loading { " · cargando…" } else { "" }
+        )),
+        Rect::new(
+            x.min(pagination.right()),
+            pagination.y,
+            pagination.right().saturating_sub(x),
+            pagination.height,
+        ),
+    );
+    let [rooms_area, detail] = if app.focused {
+        [Rect::default(), catalog]
+    } else {
+        Layout::horizontal([Constraint::Percentage(38), Constraint::Percentage(62)]).areas(catalog)
+    };
+    if !app.focused {
+        let items = app.rooms.iter().map(|room| {
+            ListItem::new(if app.tag.starts_with('@') {
+                room.username.clone()
+            } else {
+                format!("{}  ·  {} espectadores", room.username, room.viewers)
+            })
+        });
+        let list = List::new(items)
+            .block(
+                Block::default()
+                    .title(format!(
+                        " {} · {} salas ",
+                        if app.tag.is_empty() {
+                            "Populares"
+                        } else {
+                            &app.tag
+                        },
+                        app.rooms.len()
+                    ))
+                    .borders(Borders::ALL),
+            )
+            .highlight_symbol("> ")
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .bg(Color::Rgb(30, 48, 58))
+                    .add_modifier(Modifier::BOLD),
+            );
+        let mut selection =
+            ListState::default().with_selected((!app.rooms.is_empty()).then_some(app.selected));
+        frame.render_stateful_widget(list, rooms_area, &mut selection);
+        let inner = Block::bordered().inner(rooms_area);
+        for index in 0..usize::from(inner.height) {
+            let room = selection.offset() + index;
+            if room >= app.rooms.len() {
+                break;
+            }
+            app.room_rows.push((
+                Rect::new(inner.x, inner.y + index as u16, inner.width, 1),
+                room,
+            ));
+        }
+    }
+    let [room_header, preview, description] = Layout::vertical([
+        Constraint::Length(if app.focused { 1 } else { 3 }),
+        Constraint::Min(1),
+        Constraint::Length(if app.focused { 0 } else { 5 }),
+    ])
+    .areas(detail);
+    let info = app
+        .rooms
+        .get(app.selected)
+        .map(|room| {
+            format!(
+                "{} · {} · {}\nCalidad: {}",
+                room.username,
+                room.show,
+                if app.tag.starts_with('@') {
+                    "espectadores: sin datos".into()
+                } else {
+                    format!("{} espectadores", room.viewers)
+                },
+                app.quality
+            )
+        })
+        .unwrap_or_else(|| {
+            if app.loading {
+                "Buscando…".into()
+            } else {
+                "Sin resultados".into()
+            }
+        });
+    frame.render_widget(
+        Paragraph::new(info).block(Block::default().borders(Borders::ALL)),
+        room_header,
+    );
+    let block = Block::default()
+        .title(format!(
+            " Miniatura [{}] · t: actualizar · +/-: zoom · f: ampliar ",
+            app.preview_renderer.label()
+        ))
+        .borders(Borders::ALL);
+    let inner = block.inner(preview);
+    frame.render_widget(block, preview);
+    if app.session_picker.is_some() || app.session_pending {
+        // Los gráficos nativos no respetan la superposición de celdas del diálogo.
+    } else if let Some((model, pixels)) = &app.preview {
+        if app.selected_model().as_deref() == Some(model) {
+            app.preview_renderer.render(frame, inner, pixels, app.zoom);
+        } else {
+            frame.render_widget(
+                Paragraph::new("Pulsa t o Enter para cargar la miniatura"),
+                inner,
+            );
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(if let Some(error) = &app.preview_error {
+                format!(
+                    "No se pudo cargar la miniatura: {}\nPulsa t para reintentar.",
+                    sanitize_external_text(error)
+                )
+            } else if app.preview_pending {
+                "Cargando miniatura…".into()
+            } else {
+                "Pulsa t o Enter para cargar la miniatura".into()
+            })
+            .wrap(Wrap { trim: true }),
+            inner,
+        );
+    }
+    let subject = app
+        .rooms
+        .get(app.selected)
+        .map(|room| room.subject.as_str())
+        .unwrap_or("Busca con / o reintenta con R");
+    frame.render_widget(
+        Paragraph::new(subject).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .title(" Descripción ")
+                .borders(Borders::ALL),
+        ),
+        description,
+    );
 }
 
 fn render_toolbar(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
     let items: &[(&str, KeyCode)] = if app.screen == Screen::Home {
         &[
-            ("Enter Explorar", KeyCode::Enter),
+            ("Enter Sala", KeyCode::Enter),
             ("/ Buscar", KeyCode::Char('/')),
             ("g Grabaciones", KeyCode::Char('g')),
             ("a Sesión", KeyCode::Char('a')),
@@ -844,45 +1065,25 @@ fn render_toolbar(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
     }
 }
 
-fn render_home(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
-    let width = area.width.min(88);
-    let deck = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        width,
-        ..area
-    };
-    let large = deck.width >= 62 && deck.height >= 22 && app.session_url.is_none();
-    let [brand, subtitle, search, actions, details] = Layout::vertical([
-        Constraint::Length(if large { 7 } else { 2 }),
-        Constraint::Length(2),
-        Constraint::Length(3),
-        Constraint::Length(4),
-        Constraint::Min(0),
-    ])
-    .areas(deck);
-    let logo = if large {
-        " ██████╗██████╗ ██████╗ ███████╗ ██████╗\n██╔════╝██╔══██╗██╔══██╗██╔════╝██╔════╝\n██║     ██████╔╝██████╔╝█████╗  ██║     \n██║     ██╔══██╗██╔══██╗██╔══╝  ██║     \n╚██████╗██████╔╝██║  ██║███████╗╚██████╗\n ╚═════╝╚═════╝ ╚═╝  ╚═╝╚══════╝ ╚═════╝"
+fn render_search(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
+    let visible = if app.query.is_empty() && !app.editing {
+        "Vacío: populares · #gaming · @usuario · https://chaturbate.com/usuario/".into()
     } else {
-        "C B R E C"
+        format!("{}{}", app.query, if app.editing { "▌" } else { "" })
     };
+    let width = usize::from(area.width.saturating_sub(2));
+    let visible: String = visible
+        .chars()
+        .rev()
+        .take(width)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
     frame.render_widget(
-        Paragraph::new(logo).alignment(Alignment::Center).style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        brand,
-    );
-    frame.render_widget(
-        Paragraph::new("Salas en directo · grabación · sesión").alignment(Alignment::Center),
-        subtitle,
-    );
-    let query = format!("Tag: {}{}", app.query, if app.editing { "▌" } else { "" });
-    frame.render_widget(
-        Paragraph::new(query).block(
-            Block::default()
-                .title(" Buscar salas por tag ")
-                .borders(Borders::ALL)
+        Paragraph::new(visible).block(
+            Block::bordered()
+                .title(" Buscar: #tag, @usuario o URL · Enter: buscar · Esc: cancelar ")
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(if app.editing {
                     Color::Yellow
@@ -890,38 +1091,46 @@ fn render_home(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
                     Color::Cyan
                 })),
         ),
-        search,
+        area,
     );
-    app.buttons.push((search, KeyCode::Char('/')));
-    let shortcuts = vec![
-        Line::from("[/] Escribir un tag    [Enter] Explorar"),
-        Line::from(""),
-        Line::from(format!(
-            "[g] Grabaciones ({})    [a] Conectar sesión    [l] Abrir sitio",
-            app.active.len()
-        )),
-    ];
-    if deck.width >= 62 && actions.height >= 3 {
+    app.buttons.push((area, KeyCode::Char('/')));
+}
+
+fn render_home(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
+    let [intro, search, actions, catalog] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(3),
+        Constraint::Length(if area.height >= 15 { 3 } else { 0 }),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    frame.render_widget(
+        Paragraph::new(format!("EN DIRECTO · Populares del sitio · selecciona una sala para ver su miniatura\nCalidad: {} · Carpeta: {}", app.quality, sanitize_external_text(&app.output_folder.display().to_string())))
+        .style(Style::default().fg(Color::Cyan)),
+        intro,
+    );
+    render_search(frame, search, app);
+    if actions.height >= 3 {
         let cards = Layout::horizontal([Constraint::Fill(1); 3])
             .spacing(1)
             .split(actions);
         for (card, title, description, code) in [
             (
                 cards[0],
-                "[Enter] Explorar".to_string(),
-                "Salas y miniaturas".to_string(),
-                KeyCode::Enter,
+                "[p] Populares",
+                "Catálogo del sitio".into(),
+                KeyCode::Char('p'),
             ),
             (
                 cards[1],
-                "[g] Grabaciones".to_string(),
+                "[g] Grabaciones",
                 format!("{} activas", app.active.len()),
                 KeyCode::Char('g'),
             ),
             (
                 cards[2],
-                "[a] Conectar sesión".to_string(),
-                "Acceso del grabador".to_string(),
+                "[a] Conectar sesión",
+                "Elegir navegador".into(),
                 KeyCode::Char('a'),
             ),
         ] {
@@ -938,38 +1147,98 @@ fn render_home(frame: &mut Frame, area: Rect, app: &mut DiscoveryTui) {
             );
             app.buttons.push((card, code));
         }
+    }
+    render_catalog(frame, catalog, app);
+}
+
+fn render_session(frame: &mut Frame, app: &mut DiscoveryTui) {
+    app.buttons.clear();
+    app.room_rows.clear();
+    let bounds = frame.area();
+    let width = bounds.width.min(94);
+    let height = bounds.height.min(19);
+    let area = Rect::new(
+        bounds.x + bounds.width.saturating_sub(width) / 2,
+        bounds.y + bounds.height.saturating_sub(height) / 2,
+        width,
+        height,
+    );
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .title(" Conectar sesión · Esc: cancelar ")
+        .border_style(Style::default().fg(Color::Cyan));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let heading = if app.session_pending {
+        format!("Navegador elegido: {}", BROWSERS[app.session_browser])
     } else {
+        "¿Qué navegador tienes abierto?".into()
+    };
+    let [instructions, choices, hint, cancel] = Layout::vertical([
+        Constraint::Length(6),
+        Constraint::Length(if app.session_picker.is_some() { 6 } else { 4 }),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(inner);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(heading).style(Style::default().fg(Color::Yellow)),
+            Line::from("1. Mantén el navegador abierto y tu sesión iniciada en Chaturbate."),
+            Line::from(
+                "2. Instala Violentmonkey y scripts/cbrec-violentmonkey.user.js (ver README).",
+            ),
+            Line::from("3. En esa pestaña: «Enviar sesión a cbrec» y pega la dirección temporal."),
+        ])
+        .wrap(Wrap { trim: false }),
+        instructions,
+    );
+    frame.render_widget(
+        Paragraph::new("[Esc] Cancelar").style(Style::default().fg(Color::Cyan)),
+        cancel,
+    );
+    app.buttons.push((cancel, KeyCode::Esc));
+    if let Some(selected) = app.session_picker {
+        let items = BROWSERS
+            .iter()
+            .enumerate()
+            .map(|(index, browser)| ListItem::new(format!("[{}] {browser}", index + 1)));
+        let mut state = ListState::default().with_selected(Some(selected));
+        frame.render_stateful_widget(
+            List::new(items)
+                .highlight_symbol("> ")
+                .highlight_style(Style::default().fg(Color::Cyan)),
+            choices,
+            &mut state,
+        );
+        for index in 0..usize::from(choices.height).min(BROWSERS.len()) {
+            let browser = state.offset() + index;
+            if browser >= BROWSERS.len() {
+                break;
+            }
+            app.buttons.push((
+                Rect::new(choices.x, choices.y + index as u16, choices.width, 1),
+                KeyCode::Char(char::from(b'1' + browser as u8)),
+            ));
+        }
         frame.render_widget(
-            Paragraph::new(shortcuts)
-                .alignment(Alignment::Center)
+            Paragraph::new("↑/↓ y Enter, número o clic. No se leen perfiles automáticamente.")
                 .wrap(Wrap { trim: true }),
-            actions,
+            hint,
+        );
+    } else {
+        let text = if let Some(url) = &app.session_url {
+            format!("{url}\nCaduca en 120 s. Sesión solo en memoria durante esta ejecución.")
+        } else {
+            "Preparando la dirección temporal…".into()
+        };
+        frame.render_widget(
+            Paragraph::new(text)
+                .style(Style::default().fg(Color::Yellow))
+                .wrap(Wrap { trim: false }),
+            choices,
         );
     }
-    let details_text = if let Some(url) = &app.session_url {
-        vec![
-            Line::from("En Violentmonkey: «Enviar sesión a cbrec» y pega:"),
-            Line::from(url.clone()).style(Style::default().fg(Color::Yellow)),
-            Line::from("Caduca en 120 s · la cookie se conserva en memoria"),
-        ]
-    } else {
-        vec![
-            Line::from(format!(
-                "Calidad: {} · Límite: {} grabaciones",
-                app.quality, app.max_recordings
-            )),
-            Line::from(format!(
-                "Base de salida: {}",
-                sanitize_external_text(&app.output_folder.display().to_string())
-            )),
-        ]
-    };
-    frame.render_widget(
-        Paragraph::new(details_text)
-            .alignment(Alignment::Center)
-            .wrap(Wrap { trim: false }),
-        details,
-    );
 }
 
 #[cfg(test)]
@@ -980,6 +1249,7 @@ mod tests {
     fn app() -> DiscoveryTui {
         DiscoveryTui::new(TuiInitial {
             tag: String::new(),
+            page_size: 20,
             session_present: false,
             max_recordings: 3,
             quality: VideoQuality::Best,
@@ -999,6 +1269,161 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect()
+    }
+
+    #[test]
+    fn paging_keeps_the_current_page_on_error_and_stops_at_the_end() {
+        let mut app = app();
+        assert!(matches!(app.home(), Some(TuiAction::Search(query, 0, _)) if query.is_empty()));
+        app.update(TuiEvent::Rooms(
+            "#gaming".into(),
+            0,
+            app.search_generation,
+            Ok(TuiPage {
+                rooms: vec![TuiRoom::new(
+                    "alice".into(),
+                    42,
+                    "public".into(),
+                    "hello".into(),
+                )],
+                total: Some(39),
+                has_more: true,
+            }),
+        ));
+        assert!(app.change_page(false).is_none());
+        assert!(
+            matches!(app.change_page(true), Some(TuiAction::Search(query, 20, _)) if query == "#gaming")
+        );
+        assert!(app.change_page(true).is_none());
+        app.update(TuiEvent::Rooms(
+            String::new(),
+            20,
+            app.search_generation,
+            Err("Sin red".into()),
+        ));
+        assert_eq!(app.offset, 0);
+        assert_eq!(app.selected_model().as_deref(), Some("alice"));
+        assert!(app.has_more);
+        app.update(TuiEvent::Rooms(
+            "#gaming".into(),
+            20,
+            app.search_generation,
+            Ok(TuiPage {
+                rooms: vec![],
+                total: Some(39),
+                has_more: false,
+            }),
+        ));
+        assert!(app.change_page(true).is_none());
+        assert!(text(&mut app, 110, 36).contains("Página 2 de 2"));
+        let (button, _) = app
+            .buttons
+            .iter()
+            .find(|(_, code)| *code == KeyCode::PageUp)
+            .unwrap();
+        assert!(matches!(
+            app.handle_mouse(MouseEvent {
+                column: button.x,
+                row: button.y,
+                kind: MouseEventKind::Down(MouseButton::Left),
+                modifiers: KeyModifiers::NONE
+            }),
+            Some(TuiAction::Search(_, 0, _))
+        ));
+    }
+
+    #[test]
+    fn pasted_url_does_not_trigger_shortcuts_and_new_search_can_replace_loading() {
+        let mut app = app();
+        app.home();
+        app.handle_key(key(KeyCode::Char('/')));
+        for c in "https://chaturbate.com/alice/?q=record".chars() {
+            app.handle_key(key(KeyCode::Char(c)));
+        }
+        assert_eq!(app.query, "https://chaturbate.com/alice/?q=record");
+        assert!(
+            matches!(app.handle_key(key(KeyCode::Enter)), Some(TuiAction::Search(query, 0, _)) if query.contains("/alice/"))
+        );
+        app.query.clear();
+        app.editing = true;
+        app.append_query("@bob\n\u{1b}");
+        assert_eq!(app.query, "@bob");
+        app.append_query(&"x".repeat(600));
+        assert_eq!(app.query.len(), 512);
+    }
+
+    #[test]
+    fn stale_page_cannot_finish_a_newer_search_and_retry_repeats_the_failed_request() {
+        let mut app = app();
+        app.home();
+        let old_generation = app.search_generation;
+        app.query = "#music".into();
+        app.search();
+        let generation = app.search_generation;
+        app.update(TuiEvent::Rooms(
+            String::new(),
+            0,
+            old_generation,
+            Ok(TuiPage {
+                rooms: vec![],
+                total: Some(0),
+                has_more: false,
+            }),
+        ));
+        assert!(app.loading);
+        app.update(TuiEvent::Rooms(
+            String::new(),
+            0,
+            generation,
+            Err("Sin red".into()),
+        ));
+        assert!(!app.loading);
+        assert!(
+            matches!(app.handle_key(key(KeyCode::Char('R'))), Some(TuiAction::Search(query, 0, _)) if query == "#music")
+        );
+    }
+
+    #[test]
+    fn session_wizard_requires_browser_choice_and_supports_cancel() {
+        let mut app = app();
+        assert!(app.handle_key(key(KeyCode::Char('a'))).is_none());
+        let rendered = text(&mut app, 110, 36);
+        assert!(rendered.contains("¿Qué navegador tienes abierto?"));
+        assert!(rendered.contains("sesión iniciada"));
+        assert!(rendered.contains("Violentmonkey"));
+        assert!(app.handle_key(key(KeyCode::Char('r'))).is_none());
+        let (button, _) = app
+            .buttons
+            .iter()
+            .find(|(_, code)| *code == KeyCode::Char('2'))
+            .unwrap();
+        assert!(matches!(
+            app.handle_mouse(MouseEvent {
+                column: button.x,
+                row: button.y,
+                kind: MouseEventKind::Down(MouseButton::Left),
+                modifiers: KeyModifiers::NONE
+            }),
+            Some(TuiAction::ConnectSession)
+        ));
+        assert_eq!(app.session_browser, 1);
+        assert!(app.handle_key(key(KeyCode::Char('a'))).is_none());
+        assert!(matches!(
+            app.handle_key(key(KeyCode::Esc)),
+            Some(TuiAction::CancelSession)
+        ));
+        app.update(TuiEvent::SessionFinished(false, "Cancelada".into()));
+        assert!(!app.session_pending);
+        app.update(TuiEvent::SessionUrl(
+            "http://127.0.0.1:1234/cancelled".into(),
+        ));
+        assert!(app.session_url.is_none());
+        assert!(!app.session_pending);
+        for (w, h) in [(1, 1), (20, 8), (80, 24)] {
+            app.handle_key(key(KeyCode::Char('a')));
+            text(&mut app, w, h);
+            app.handle_key(key(KeyCode::Esc));
+        }
     }
 
     #[test]
@@ -1153,16 +1578,22 @@ mod tests {
         let mut app = app();
         assert!(text(&mut app, 100, 32).contains("Inicio"));
         assert!(
-            matches!(app.handle_key(key(KeyCode::Enter)), Some(TuiAction::Search(tag)) if tag == "gaming")
+            matches!(app.handle_key(key(KeyCode::Enter)), Some(TuiAction::Search(tag, 0, _)) if tag.is_empty())
         );
         app.update(TuiEvent::Rooms(
-            "gaming".into(),
-            Ok(vec![TuiRoom::new(
-                "alice".into(),
-                42,
-                "public".into(),
-                "hello".into(),
-            )]),
+            "#gaming".into(),
+            0,
+            app.search_generation,
+            Ok(TuiPage {
+                rooms: vec![TuiRoom::new(
+                    "alice".into(),
+                    42,
+                    "public".into(),
+                    "hello".into(),
+                )],
+                total: Some(1),
+                has_more: false,
+            }),
         ));
         app.move_up();
         app.move_down();
@@ -1176,7 +1607,9 @@ mod tests {
         assert!(rendered.contains("hello"));
         assert!(app.handle_key(key(KeyCode::Esc)).is_none());
         assert!(app.screen == Screen::Browse);
-        assert!(app.handle_key(key(KeyCode::Esc)).is_none());
+        assert!(
+            matches!(app.handle_key(key(KeyCode::Esc)), Some(TuiAction::Search(query, 0, _)) if query.is_empty())
+        );
         assert!(app.screen == Screen::Home);
         assert!(matches!(
             app.handle_key(key(KeyCode::Esc)),
@@ -1194,7 +1627,7 @@ mod tests {
         assert_eq!(app.query, "qr");
         app.handle_key(key(KeyCode::Backspace));
         assert!(
-            matches!(app.handle_key(key(KeyCode::Enter)), Some(TuiAction::Search(tag)) if tag == "q")
+            matches!(app.handle_key(key(KeyCode::Enter)), Some(TuiAction::Search(tag, 0, _)) if tag == "q")
         );
     }
 
@@ -1225,10 +1658,24 @@ mod tests {
     #[test]
     fn preview_and_empty_error_states_render_at_small_sizes() {
         let mut app = app();
-        app.update(TuiEvent::Rooms("gaming".into(), Err("Sin conexión".into())));
+        app.update(TuiEvent::Rooms(
+            "#gaming".into(),
+            0,
+            app.search_generation,
+            Err("Sin conexión".into()),
+        ));
         assert!(!app.loading);
         assert!(app.notice.contains("Sin conexión"));
-        app.update(TuiEvent::Rooms("gaming".into(), Ok(Vec::new())));
+        app.update(TuiEvent::Rooms(
+            "#gaming".into(),
+            0,
+            app.search_generation,
+            Ok(TuiPage {
+                rooms: Vec::new(),
+                total: Some(0),
+                has_more: false,
+            }),
+        ));
         app.screen = Screen::Browse;
         for (width, height) in [(1, 1), (20, 8), (80, 24), (160, 50)] {
             text(&mut app, width, height);
@@ -1278,6 +1725,7 @@ mod tests {
         assert!(text(&mut app, 100, 32).contains("bob"));
         app.handle_key(key(KeyCode::Char('h')));
         assert!(app.screen == Screen::Home);
+        app.session_pending = true;
         app.update(TuiEvent::SessionUrl(
             "http://127.0.0.1:1234/cbrec-session/test".into(),
         ));
@@ -1285,8 +1733,9 @@ mod tests {
         app.update(TuiEvent::SessionFinished(true, "Recibida".into()));
         assert!(app.session_url.is_none());
         assert!(app.session_present);
+        assert!(app.handle_key(key(KeyCode::Char('a'))).is_none());
         assert!(matches!(
-            app.handle_key(key(KeyCode::Char('a'))),
+            app.handle_key(key(KeyCode::Enter)),
             Some(TuiAction::ConnectSession)
         ));
     }
@@ -1313,7 +1762,7 @@ mod tests {
     fn home_is_a_search_deck_with_visible_actions() {
         let mut app = app();
         let rendered = text(&mut app, 110, 36);
-        assert!(rendered.contains("Buscar salas por tag"));
+        assert!(rendered.contains("Buscar: #tag, @usuario o URL"));
         assert!(rendered.contains("[g] Grabaciones"));
         assert!(rendered.contains("[a] Conectar"));
         assert!(!rendered.contains("La sesión del navegador y la del grabador son independientes."));

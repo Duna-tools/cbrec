@@ -1,6 +1,6 @@
 //! Discovers public rooms by tag without changing account or recording state.
 
-use crate::infrastructure::external::DiscoveredRoom;
+use crate::infrastructure::external::{DiscoveredRoom, EstadoStream, RoomPage};
 use crate::infrastructure::ChaturbateClient;
 use crate::presentation::Output;
 use serde::Serialize;
@@ -74,9 +74,141 @@ pub(crate) fn normalize_tag(raw_tag: &str) -> anyhow::Result<String> {
     Ok(tag.to_ascii_lowercase())
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum DiscoveryQuery {
+    Popular,
+    Tag(String),
+    Model(crate::domain::value_objects::ModelName),
+}
+
+pub(crate) fn parse_query(raw: &str) -> anyhow::Result<DiscoveryQuery> {
+    use crate::domain::value_objects::ModelName;
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(DiscoveryQuery::Popular);
+    }
+    let model = if let Some(model) = raw.strip_prefix('@') {
+        model.to_string()
+    } else if raw.contains("://")
+        || raw.starts_with("chaturbate.com/")
+        || raw.starts_with("www.chaturbate.com/")
+    {
+        let url = url::Url::parse(&if raw.contains("://") {
+            raw.into()
+        } else {
+            format!("https://{raw}")
+        })?;
+        let host = url.host_str().unwrap_or_default();
+        anyhow::ensure!(
+            matches!(url.scheme(), "https" | "http")
+                && crate::application::utils::is_chaturbate_host(host)
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.port().is_none(),
+            "Usa una URL de perfil de chaturbate.com"
+        );
+        let path = url.path().trim_matches('/');
+        anyhow::ensure!(
+            !path.contains('/'),
+            "La URL debe apuntar a un perfil, no a una sección"
+        );
+        path.into()
+    } else {
+        return Ok(DiscoveryQuery::Tag(normalize_tag(raw)?));
+    };
+    anyhow::ensure!(
+        model.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+        "Nombre de usuario inválido"
+    );
+    Ok(DiscoveryQuery::Model(ModelName::try_from(model)?))
+}
+
+pub(crate) async fn find_page(
+    client: &ChaturbateClient,
+    raw: &str,
+    limit: usize,
+    offset: usize,
+) -> anyhow::Result<(String, RoomPage)> {
+    anyhow::ensure!(
+        (1..=MAX_RESULTS).contains(&limit),
+        "El límite debe estar entre 1 y {MAX_RESULTS}"
+    );
+    match parse_query(raw)? {
+        DiscoveryQuery::Popular => Ok((
+            String::new(),
+            client.discover_room_page(None, limit, offset).await?,
+        )),
+        DiscoveryQuery::Tag(tag) => {
+            let page = client.discover_room_page(Some(&tag), limit, offset).await?;
+            Ok((format!("#{tag}"), page))
+        }
+        DiscoveryQuery::Model(model) => {
+            anyhow::ensure!(offset == 0, "Un perfil no tiene páginas adicionales");
+            let show = match client.consultar_estado(&model).await? {
+                EstadoStream::Online { .. } => "online",
+                EstadoStream::Offline => "offline",
+                EstadoStream::RequiereSesion { .. } => "requiere sesión o permisos",
+                EstadoStream::RateLimited => {
+                    anyhow::bail!("El sitio limitó las consultas; espera antes de reintentar")
+                }
+                EstadoStream::Bloqueado { .. } => {
+                    anyhow::bail!("El sitio bloqueó la consulta del perfil")
+                }
+                EstadoStream::RespuestaInesperada { .. } => {
+                    anyhow::bail!("El sitio devolvió una respuesta de perfil no reconocida")
+                }
+            };
+            Ok((format!("@{model}"), RoomPage {
+                rooms: vec![DiscoveredRoom { username: model.to_string(), thumbnail_url: None, subject: "Perfil consultado directamente. Abre la sala para ver vídeo y chat; grabar requiere una emisión accesible.".into(), viewers: 0, show: show.into() }],
+                total: Some(1), has_more: false,
+            }))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_distinguishes_catalog_tags_and_profile_urls() {
+        assert_eq!(parse_query(" ").unwrap(), DiscoveryQuery::Popular);
+        assert_eq!(
+            parse_query("Gaming").unwrap(),
+            DiscoveryQuery::Tag("gaming".into())
+        );
+        assert_eq!(
+            parse_query("#Gaming").unwrap(),
+            DiscoveryQuery::Tag("gaming".into())
+        );
+        for raw in [
+            "@Alice_1",
+            "https://chaturbate.com/Alice_1/",
+            "https://es.chaturbate.com/alice_1/?source=test#bio",
+            "chaturbate.com/alice_1/",
+        ] {
+            assert!(
+                matches!(parse_query(raw).unwrap(), DiscoveryQuery::Model(model) if model.as_str() == "alice_1"),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "https://evil.example/alice",
+            "https://chaturbate.com.evil.example/alice",
+            "https://chaturbate.com@evil.example/alice",
+            "https://u:p@chaturbate.com/alice",
+            "https://chaturbate.com:8443/alice",
+            "file:///alice",
+            "https://chaturbate.com/",
+            "https://chaturbate.com/tags/gaming",
+            "@",
+            "@bad/name",
+            "@álice",
+            "#bad tag",
+        ] {
+            assert!(parse_query(raw).is_err(), "{raw}");
+        }
+    }
 
     #[test]
     fn normalize_tag_accepts_hash_and_rejects_unsafe_input() {

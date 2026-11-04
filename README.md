@@ -213,9 +213,13 @@ cbrec watch --help
 
 ### Panel interactivo
 
-`Enter` explora o entra en una sala; `o` abre vídeo y chat en el navegador;
+Inicio carga el catálogo público del sitio. Pulsa `/` para buscar por `#tag`,
+`@usuario` o URL; PgUp/PgDn o los botones recorren páginas de resultados.
+`Enter` confirma la búsqueda al editar o entra en la sala seleccionada;
+`o` abre vídeo y chat en el navegador;
 `r` graba, `s` detiene y `g` muestra las grabaciones activas. `a` conecta una
-sesión temporal, `t` carga la miniatura, `+`/`-` hacen zoom y `f` amplía el panel.
+sesión temporal con un asistente que pregunta qué navegador tienes abierto y
+recuerda que debes tener tu sesión iniciada; `t` carga la miniatura, `+`/`-` hacen zoom y `f` amplía el panel.
 El chat utiliza la sesión del navegador; la grabación, la sesión recibida por cbrec.
 Las miniaturas conservan su resolución y usan gráficos del terminal cuando hay
 soporte. Hay botones, selección con clic y navegación con rueda, además del teclado.
