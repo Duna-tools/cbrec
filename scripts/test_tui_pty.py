@@ -51,7 +51,6 @@ def check(binary):
     master, slave = pty.openpty()
     status_reader, status_writer = os.pipe()
     release_reader, release_writer = os.pipe()
-    before = termios.tcgetattr(slave)
     transcript = bytearray()
     child = None
 
@@ -94,6 +93,8 @@ def check(binary):
                 [sys.executable, "-c", """
 import os, subprocess, sys
 status_fd, release_fd = map(int, sys.argv[1:3])
+os.write(status_fd, b"ready")
+os.read(release_fd, 1)
 result = subprocess.run(sys.argv[3:])
 os.write(status_fd, str(result.returncode).encode())
 os.read(release_fd, 1)
@@ -106,6 +107,11 @@ sys.exit(result.returncode)
             status_writer = None
             os.close(release_reader)
             release_reader = None
+            assert select.select([status_reader], [], [], 3)[0], "La sesión PTY no inició"
+            assert os.read(status_reader, 32) == b"ready"
+            # La referencia corresponde a la sesión ya adjunta, antes de que cbrec cambie sus modos.
+            before = termios.tcgetattr(slave)
+            os.write(release_writer, b"1")
             read_until(b"Inicio", 5)
             os.write(master, b"/")
             read_until(seconds=0.15)
@@ -138,7 +144,7 @@ sys.exit(result.returncode)
             assert os.read(status_reader, 32) == b"0", bytes(transcript[-2500:])
             # macOS revoca el PTY al salir su líder; el supervisor vive hasta comprobar termios.
             after = termios.tcgetattr(slave)
-            assert after == before, "La TUI debe restaurar los atributos del terminal"
+            assert after == before, f"La TUI debe restaurar los atributos del terminal: antes={before!r}; después={after!r}"
             assert b"\x1b[?1006l" in transcript, "La TUI debe desactivar la captura de ratón"
             os.write(release_writer, b"1")
             assert child.wait(timeout=3) == 0
