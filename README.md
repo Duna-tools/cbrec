@@ -126,7 +126,7 @@ cbrec nombremodelo --ffmpeg-path /usr/local/bin/ffmpeg
 CBREC_FFMPEG=/usr/local/bin/ffmpeg cbrec nombremodelo
 ```
 
-La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
+La calidad por defecto es `best`: cbrec resuelve la variante de mayor resolución disponible y graba esa URL directa. Las variaciones de bitrate no implican por sí solas un cambio de resolución. Véanse el [diagnóstico y los límites de recuperación de red](docs/recording_recovery.md). Si usas `--duration`, el archivo se trata como clip explícito y no se marca como "archivo muy pequeño" por el umbral normal de grabaciones largas.
 
 Las nuevas grabaciones se escriben directamente en un `.mp4` fragmentado, sin crear vídeos `.part.mp4`. Se copian audio y vídeo sin recodificar. Los fragmentos se guardan periódicamente para reducir la memoria de FFmpeg y conservar contenido legible ante una interrupción. Algunos editores pueden tener menor compatibilidad con MP4 fragmentado.
 

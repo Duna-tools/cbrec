@@ -2,6 +2,7 @@ use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::VideoQuality;
 use crate::domain::value_objects::{ModelName, StreamUrl};
 use crate::infrastructure::external::ffmpeg_process::run_ffmpeg;
+use crate::infrastructure::external::hls_relay::HlsRelay;
 use crate::infrastructure::InfrastructureError;
 use async_trait::async_trait;
 use quick_m3u8::config::ParsingOptionsBuilder;
@@ -22,7 +23,7 @@ const HTTP_RETRY_MAX_ELAPSED_SECS: u64 = 10;
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
-enum RetryFailure<E> {
+pub(super) enum RetryFailure<E> {
     Transient(E),
     Permanent(E),
 }
@@ -76,7 +77,9 @@ async fn read_limited_text(
 /// Retries transient HTTP failures with bounded deterministic exponential delays.
 ///
 /// ponytail: add jitter only if synchronized clients create measurable upstream load spikes.
-async fn retry_with_backoff<T, F, Fut>(mut operation: F) -> Result<T, InfrastructureError>
+pub(super) async fn retry_with_backoff<T, F, Fut>(
+    mut operation: F,
+) -> Result<T, InfrastructureError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, RetryFailure<InfrastructureError>>>,
@@ -400,15 +403,28 @@ impl StreamRepository for ChaturbateClient {
             .ffmpeg_path
             .as_deref()
             .unwrap_or_else(|| Path::new("ffmpeg"));
-        run_ffmpeg(
+        let relay = HlsRelay::start(self.client.clone(), stream_url.as_str()).await?;
+        let result = run_ffmpeg(
             ffmpeg_path,
-            stream_url.as_str(),
+            &relay.url,
             output_path,
             self.max_duration_secs,
             self.min_free_space,
             self.cancel_rx.clone(),
         )
-        .await
+        .await;
+        match result {
+            Err(InfrastructureError::RecordingCancelled) => {
+                Err(InfrastructureError::RecordingCancelled)
+            }
+            Err(error) => match relay.last_error().await {
+                Some(detail) => Err(InfrastructureError::RecordingError(format!(
+                    "{error}; último error HLS: {detail}"
+                ))),
+                None => Err(error),
+            },
+            Ok(()) => Ok(()),
+        }
     }
 }
 
