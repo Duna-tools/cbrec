@@ -20,7 +20,7 @@ mod tui;
 
 use image::{DynamicImage, ImageBuffer, Rgb};
 use std::sync::Arc;
-use tui::{TuiAction, TuiEvent, TuiInitial, TuiRoom};
+use tui::{TuiAction, TuiEvent, TuiInitial, TuiPage, TuiRoom};
 
 fn main() -> anyhow::Result<()> {
     let (commands, mut actions) = tokio::sync::mpsc::channel(16);
@@ -28,22 +28,28 @@ fn main() -> anyhow::Result<()> {
     let worker = std::thread::spawn(move || {
         while let Some(action) = actions.blocking_recv() {
             let event = match action {
-                TuiAction::Search(tag) => TuiEvent::Rooms(
+                TuiAction::Search(tag, offset, generation) => TuiEvent::Rooms(
                     tag,
-                    Ok(vec![
-                        TuiRoom::new(
-                            "sala_demo_1".into(),
-                            120,
-                            "public".into(),
-                            "Patrón sintético · QA sin red".into(),
-                        ),
-                        TuiRoom::new(
-                            "sala_demo_2".into(),
-                            48,
-                            "public".into(),
-                            "Segunda imagen · QA sin red".into(),
-                        ),
-                    ]),
+                    offset,
+                    generation,
+                    Ok(TuiPage {
+                        rooms: vec![
+                            TuiRoom::new(
+                                "sala_demo_1".into(),
+                                120,
+                                "public".into(),
+                                "Patrón sintético · QA sin red".into(),
+                            ),
+                            TuiRoom::new(
+                                "sala_demo_2".into(),
+                                48,
+                                "public".into(),
+                                "Segunda imagen · QA sin red".into(),
+                            ),
+                        ],
+                        total: Some(2),
+                        has_more: false,
+                    }),
                 ),
                 TuiAction::Preview(model) | TuiAction::RefreshPreview(model) => {
                     let second = model.ends_with('2');
@@ -68,6 +74,7 @@ fn main() -> anyhow::Result<()> {
     let result = tui::run_discovery_tui(
         TuiInitial {
             tag: String::new(),
+            page_size: 20,
             session_present: false,
             max_recordings: 2,
             quality: domain::value_objects::VideoQuality::Best,

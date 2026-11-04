@@ -129,11 +129,13 @@ impl PreviewRenderer {
             self.encoded = Some((image.clone(), zoom, self.picker.new_resize_protocol(view)));
         }
         if let Some((_, _, protocol)) = &mut self.encoded {
-            frame.render_stateful_widget(
-                StatefulImage::default().resize(Resize::Scale(Some(FilterType::Lanczos3))),
-                area,
-                protocol,
-            );
+            // Ampliar sin pedir zoom suaviza la imagen; en texto, más celdas sí aportan detalle.
+            let resize = if zoom > 1 || self.picker.protocol_type() == ProtocolType::Halfblocks {
+                Resize::Scale(Some(FilterType::Lanczos3))
+            } else {
+                Resize::Fit(Some(FilterType::Lanczos3))
+            };
+            frame.render_stateful_widget(StatefulImage::default().resize(resize), area, protocol);
         }
     }
 
@@ -449,6 +451,82 @@ mod tests {
         assert_eq!(renderer.encoded.as_ref().unwrap().1, 2);
         assert_eq!((image.width(), image.height()), (480, 270));
     }
+    #[test]
+    fn graphical_preview_keeps_natural_pixels_until_zoom_is_requested() {
+        let image = Arc::new(DynamicImage::ImageRgb8(image::ImageBuffer::from_fn(
+            480,
+            260,
+            |x, y| image::Rgb([(x % 251) as u8, (y % 251) as u8, 79]),
+        )));
+        let mut renderer = PreviewRenderer::new();
+        renderer.picker.set_protocol_type(ProtocolType::Iterm2);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let pixels = |renderer: &PreviewRenderer| {
+            let protocol = &renderer.encoded.as_ref().unwrap().2;
+            let ratatui_image::protocol::StatefulProtocolType::ITerm2(encoded) =
+                protocol.protocol_type()
+            else {
+                panic!("Se esperaba iTerm2");
+            };
+            let payload = encoded
+                .data
+                .split_once("doNotMoveCursor=1:")
+                .unwrap()
+                .1
+                .trim_end_matches('\u{7}');
+            image::load_from_memory(&STANDARD.decode(payload).unwrap())
+                .unwrap()
+                .to_rgb8()
+        };
+        terminal
+            .draw(|frame| renderer.render(frame, frame.area(), &image, 1))
+            .unwrap();
+        let original = pixels(&renderer);
+        assert_eq!(original.dimensions(), image.to_rgb8().dimensions());
+        assert!(
+            original == image.to_rgb8(),
+            "Un panel grande debe conservar cada píxel original"
+        );
+        terminal
+            .draw(|frame| renderer.render(frame, frame.area(), &image, 2))
+            .unwrap();
+        assert!(
+            pixels(&renderer).width() > image.width() / 2,
+            "El zoom explícito debe seguir ampliando el recorte"
+        );
+        terminal
+            .draw(|frame| renderer.render(frame, Rect::new(0, 0, 20, 8), &image, 1))
+            .unwrap();
+        let fitted = pixels(&renderer);
+        assert!(fitted.width() <= 200 && fitted.height() <= 160);
+        assert_eq!((image.width(), image.height()), (480, 260));
+    }
+
+    #[test]
+    fn small_text_preview_uses_available_cells_for_detail() {
+        let image = Arc::new(DynamicImage::ImageRgb8(image::ImageBuffer::from_pixel(
+            10,
+            10,
+            image::Rgb([240, 80, 40]),
+        )));
+        let mut renderer = PreviewRenderer::new();
+        let mut terminal = Terminal::new(TestBackend::new(30, 12)).unwrap();
+        terminal
+            .draw(|frame| renderer.render(frame, frame.area(), &image, 1))
+            .unwrap();
+        let painted = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| matches!(cell.fg, ratatui::style::Color::Rgb(240, 80, 40)))
+            .count();
+        assert!(
+            painted > 1,
+            "El modo texto debe aprovechar más de una celda"
+        );
+    }
+
     #[test]
     fn protocol_selection_is_explicit_and_validated() {
         assert_eq!(protocol_override(None).unwrap(), None);

@@ -125,6 +125,9 @@ sys.exit(result.returncode)
             os.write(master, b"\x7f" * 6 + b"qr")
             read_until(seconds=0.3)
             assert not select.select([status_reader], [], [], 0)[0], "q al editar debe escribir, no cerrar"
+            os.write(master, b"\x15\x1b[200~https://chaturbate.com/alice/?q=record\x1b[201~")
+            read_until(b"chaturbate.com/alice/", 2)
+            assert not select.select([status_reader], [], [], 0)[0], "Pegar una URL no debe activar atajos"
             os.write(master, b"\x1b")
             read_until(seconds=0.2)
             rows = screen_text(bytes(transcript)).splitlines()
@@ -145,14 +148,26 @@ sys.exit(result.returncode)
             # El diff de Ratatui puede omitir letras iguales; resize fuerza un frame completo.
             resize(112, 36)
             read_until(b"Inicio", 3)
+            os.write(master, b"a")
+            read_until(b"Violentmonkey", 3)
+            resize(113, 36)
+            read_until("sesión iniciada".encode(), 3)
+            os.write(master, b"2")
+            read_until(b"127.0.0.1", 3)
+            os.write(master, b"\x1b")
+            read_until(b"cancelada", 3)
             os.write(master, b"q")
-            read_until(seconds=0.2)
-            assert select.select([status_reader], [], [], 3)[0], "La TUI no terminó"
+            deadline = time.monotonic() + 3
+            # Drenar el PTY evita bloquear un último repintado mientras esperamos el cierre.
+            while time.monotonic() < deadline and not select.select([status_reader], [], [], 0)[0]:
+                read_until(seconds=0.05)
+            assert select.select([status_reader], [], [], 0)[0], "La TUI no terminó"
             assert os.read(status_reader, 32) == b"0", bytes(transcript[-2500:])
             # macOS revoca el PTY al salir su líder; el supervisor vive hasta comprobar termios.
             after = termios.tcgetattr(slave)
             assert stable_terminal_attributes(after) == stable_terminal_attributes(before), f"La TUI debe restaurar los atributos del terminal: antes={before!r}; después={after!r}"
             assert b"\x1b[?1006l" in transcript, "La TUI debe desactivar la captura de ratón"
+            assert b"\x1b[?2004h" in transcript and b"\x1b[?2004l" in transcript, "La TUI debe restaurar el modo de pegado"
             os.write(release_writer, b"1")
             assert child.wait(timeout=3) == 0
     finally:
@@ -166,7 +181,7 @@ sys.exit(result.returncode)
                 os.close(descriptor)
             except OSError:
                 pass
-    print("TUI PTY: inicio, edición, clic, grabaciones, resize y restauración PASS")
+    print("TUI PTY: inicio, URL pegada, clic, grabaciones, sesión cancelada, resize y restauración PASS")
 
 
 if __name__ == "__main__":

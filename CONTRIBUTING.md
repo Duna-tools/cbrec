@@ -7,6 +7,11 @@ contra `main` y después se incorporan también a `beta`.
 
 Antes de enviar un cambio:
 
+Localiza el área en [MAINTAINERS.md](MAINTAINERS.md) y consulta el
+[mapa del código](docs/architecture.md). Si el cambio cruza áreas, revisa sus
+consumidores y pruebas. Separa una reorganización de una corrección funcional
+cuando ambas puedan revisarse y verificarse por separado.
+
 ```bash
 cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
