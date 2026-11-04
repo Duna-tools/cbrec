@@ -49,6 +49,8 @@ def screen_text(raw):
 def check(binary):
     binary = str(Path(binary).resolve())
     master, slave = pty.openpty()
+    status_reader, status_writer = os.pipe()
+    release_reader, release_writer = os.pipe()
     before = termios.tcgetattr(slave)
     transcript = bytearray()
     child = None
@@ -74,7 +76,7 @@ def check(binary):
     def resize(width, height):
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", height, width, 0, 0))
         if child:
-            child.send_signal(signal.SIGWINCH)
+            os.killpg(child.pid, signal.SIGWINCH)
 
     try:
         with tempfile.TemporaryDirectory(prefix="cbrec-tui-pty-") as temporary:
@@ -89,15 +91,27 @@ def check(binary):
                 fcntl.ioctl(0, termios.TIOCSCTTY, 0)
 
             child = subprocess.Popen(
-                [binary, "tui"], stdin=slave, stdout=slave, stderr=slave,
-                env=environment, preexec_fn=attach_terminal,
+                [sys.executable, "-c", """
+import os, subprocess, sys
+status_fd, release_fd = map(int, sys.argv[1:3])
+result = subprocess.run(sys.argv[3:])
+os.write(status_fd, str(result.returncode).encode())
+os.read(release_fd, 1)
+sys.exit(result.returncode)
+""", str(status_writer), str(release_reader), binary, "tui"],
+                stdin=slave, stdout=slave, stderr=slave, env=environment,
+                preexec_fn=attach_terminal, pass_fds=(status_writer, release_reader),
             )
+            os.close(status_writer)
+            status_writer = None
+            os.close(release_reader)
+            release_reader = None
             read_until(b"Inicio", 5)
             os.write(master, b"/")
             read_until(seconds=0.15)
             os.write(master, b"\x7f" * 6 + b"qr")
             read_until(seconds=0.3)
-            assert child.poll() is None, "q al editar debe escribir, no cerrar"
+            assert not select.select([status_reader], [], [], 0)[0], "q al editar debe escribir, no cerrar"
             os.write(master, b"\x1b")
             read_until(seconds=0.2)
             rows = screen_text(bytes(transcript)).splitlines()
@@ -111,7 +125,7 @@ def check(binary):
             read_until(b"No hay grabaciones activas", 2)
             resize(20, 8)
             read_until(seconds=0.2)
-            assert child.poll() is None, "El resize no debe cerrar la TUI"
+            assert not select.select([status_reader], [], [], 0)[0], "El resize no debe cerrar la TUI"
             resize(110, 36)
             os.write(master, b"h")
             read_until(seconds=0.3)
@@ -120,16 +134,25 @@ def check(binary):
             read_until(b"Inicio", 3)
             os.write(master, b"q")
             read_until(seconds=0.2)
-            assert child.wait(timeout=3) == 0, bytes(transcript[-2500:])
+            assert select.select([status_reader], [], [], 3)[0], "La TUI no terminó"
+            assert os.read(status_reader, 32) == b"0", bytes(transcript[-2500:])
+            # macOS revoca el PTY al salir su líder; el supervisor vive hasta comprobar termios.
             after = termios.tcgetattr(slave)
             assert after == before, "La TUI debe restaurar los atributos del terminal"
             assert b"\x1b[?1006l" in transcript, "La TUI debe desactivar la captura de ratón"
+            os.write(release_writer, b"1")
+            assert child.wait(timeout=3) == 0
     finally:
         if child and child.poll() is None:
-            child.kill()
+            os.killpg(child.pid, signal.SIGKILL)
             child.wait()
-        os.close(master)
-        os.close(slave)
+        for descriptor in (master, slave, status_reader, status_writer, release_reader, release_writer):
+            if descriptor is None:
+                continue
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
     print("TUI PTY: inicio, edición, clic, grabaciones, resize y restauración PASS")
 
 
