@@ -22,11 +22,18 @@ Thumbs.db
 
 # Recordings (test files)
 /captures/
+/cb_rec/
 *.mp4
 *.ts
 
 # Config overrides
 config.local.toml
+/config.toml
+/config/config.toml
+/watched.toml
+.env
+.env.*
+!.env.example
 
 # Tools / AI
 codedb.snapshot
@@ -42,6 +49,7 @@ doc/
 
 # Caché de las pruebas Python de release
 __pycache__/
+*.py[cod]
 
 # Informes de herramientas y planificación local
 /mutants.out*/
