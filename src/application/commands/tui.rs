@@ -9,8 +9,9 @@ use crate::application::thumbnail::{decode_thumbnail, ThumbnailCache};
 use crate::application::utils::validar_ffmpeg;
 use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::{ModelName, VideoQuality};
+use crate::infrastructure::external::RoomPage;
 use crate::infrastructure::{receive_browser_session_with_prompt, AppConfig, ChaturbateClient};
-use crate::presentation::tui::{TuiAction, TuiEvent, TuiInitial};
+use crate::presentation::tui::{TuiAction, TuiEvent, TuiInitial, TuiPage};
 use crate::presentation::{run_discovery_tui, TuiRoom};
 use image::DynamicImage;
 use std::collections::HashMap;
@@ -36,17 +37,14 @@ pub(crate) struct TuiParams {
 }
 
 enum OperationResult {
-    Rooms(
-        String,
-        Result<Vec<crate::infrastructure::external::DiscoveredRoom>, String>,
-    ),
+    Rooms(u64, usize, Result<(String, RoomPage), String>),
     Preview(
         u64,
         String,
         String,
         Result<(Arc<DynamicImage>, Duration), String>,
     ),
-    Session(Result<String, String>),
+    Session(u64, Result<String, String>),
     Browser(Result<(), String>),
 }
 
@@ -72,6 +70,7 @@ pub(crate) async fn run(params: TuiParams, raw_tag: &str, limit: usize) -> anyho
     let (events, updates) = mpsc::channel(64);
     let initial = TuiInitial {
         tag,
+        page_size: limit,
         session_present: params.config.auth.session_cookie.is_some(),
         max_recordings: params.max_recordings,
         quality: params.initial_quality,
@@ -102,12 +101,13 @@ pub(crate) async fn run_worker(
     let mut recordings = JoinSet::new();
     let mut active = HashMap::<String, (watch::Sender<bool>, PathBuf)>::new();
     let mut task_models = HashMap::<Id, String>::new();
-    let mut search_pending = false;
+    let mut search_job: Option<(u64, tokio::task::AbortHandle)> = None;
     let mut preview_job: Option<(u64, String, tokio::task::AbortHandle)> = None;
     let mut preview_generation = 0_u64;
     let mut preview_cache = ThumbnailCache::new();
     let mut thumbnail_urls = HashMap::<String, String>::new();
-    let mut session_pending = false;
+    let mut session_job: Option<tokio::task::AbortHandle> = None;
+    let mut session_generation = 0_u64;
     let mut cancel_rx = params.cancel_rx.clone();
     loop {
         tokio::select! {
@@ -116,13 +116,17 @@ pub(crate) async fn run_worker(
                 let Some(action) = action else { break; };
                 match action {
                     TuiAction::Quit => break,
-                    TuiAction::Search(tag) if !search_pending => {
-                        search_pending = true;
+                    TuiAction::Search(query, offset, generation) => {
+                        if let Some((_, task)) = search_job.take() { task.abort(); }
                         let client = params.client.clone();
-                        operations.spawn(async move {
-                            let result = discover::find_rooms(&client, &tag, limit).await.map(|result| result.rooms).map_err(|error| error.to_string());
-                            OperationResult::Rooms(tag.trim().trim_start_matches('#').to_ascii_lowercase(), result)
+                        let task = operations.spawn(async move {
+                            let result = match tokio::time::timeout(Duration::from_secs(8), discover::find_page(&client, &query, limit, offset)).await {
+                                Ok(result) => result.map_err(|error| error.to_string()),
+                                Err(_) => Err("La búsqueda superó 8 segundos. Se conservaron los resultados; pulsa R para reintentar.".into()),
+                            };
+                            OperationResult::Rooms(generation, offset, result)
                         });
+                        search_job = Some((generation, task));
                     }
                     action @ (TuiAction::Preview(_) | TuiAction::RefreshPreview(_)) => {
                         let refresh = matches!(action, TuiAction::RefreshPreview(_));
@@ -148,13 +152,18 @@ pub(crate) async fn run_worker(
                         });
                         preview_job = Some((generation, model, task));
                     }
-                    TuiAction::ConnectSession if !session_pending => {
-                        session_pending = true;
+                    TuiAction::CancelSession => {
+                        if let Some(task) = session_job.take() { task.abort(); }
+                        let _ = events.send(TuiEvent::SessionFinished(params.config.auth.session_cookie.is_some(), "Conexión de sesión cancelada".into())).await;
+                    }
+                    TuiAction::ConnectSession if session_job.is_none() => {
+                        session_generation = session_generation.wrapping_add(1);
+                        let generation = session_generation;
                         let sender = events.clone();
-                        operations.spawn(async move {
+                        session_job = Some(operations.spawn(async move {
                             let result = receive_browser_session_with_prompt(|url| { let _ = sender.try_send(TuiEvent::SessionUrl(url.to_string())); }).await.map_err(|error| error.to_string());
-                            OperationResult::Session(result)
-                        });
+                            OperationResult::Session(generation, result)
+                        }));
                     }
                     TuiAction::OpenRoom(model) => {
                         if operations.len() < 4 { operations.spawn(async move { OperationResult::Browser(open_site(Some(&model)).await.map_err(|error| error.to_string())) }); }
@@ -189,16 +198,20 @@ pub(crate) async fn run_worker(
             }
             Some(result) = operations.join_next(), if !operations.is_empty() => {
                 match result {
-                    Ok(OperationResult::Rooms(tag, result)) => {
-                        search_pending = false;
-                        let result = result.map(|rooms| {
+                    Ok(OperationResult::Rooms(generation, offset, result)) => {
+                        if search_job.as_ref().is_none_or(|(current, _)| *current != generation) { continue; }
+                        search_job = None;
+                        let mut query = String::new();
+                        let result = result.map(|(normalized, page)| {
+                            query = normalized;
                             thumbnail_urls.clear();
-                            rooms.into_iter().map(|room| {
+                            let rooms = page.rooms.into_iter().map(|room| {
                                 if let Some(url) = room.thumbnail_url { thumbnail_urls.insert(room.username.clone(), url); }
                                 TuiRoom::new(room.username, room.viewers, room.show, room.subject)
-                            }).collect()
+                            }).collect();
+                            TuiPage { rooms, total: page.total, has_more: page.has_more }
                         });
-                        let _ = events.send(TuiEvent::Rooms(tag, result)).await;
+                        let _ = events.send(TuiEvent::Rooms(query, offset, generation, result)).await;
                     }
                     Ok(OperationResult::Preview(generation, model, source, result)) => {
                         if preview_job.as_ref().is_some_and(|(current, _, _)| *current == generation) {
@@ -207,14 +220,14 @@ pub(crate) async fn run_worker(
                             let _ = events.send(TuiEvent::Preview(model, result)).await;
                         }
                     }
-                    Ok(OperationResult::Session(result)) => {
-                        session_pending = false;
+                    Ok(OperationResult::Session(generation, result)) => {
+                        if generation != session_generation || session_job.take().is_none() { continue; }
                         let (present, message) = match result { Ok(cookie) => { params.client = params.client.with_session_cookie(cookie.clone()); params.config.auth.session_cookie = Some(cookie); (true, "Sesión recibida en memoria. Su validez se comprobará al consultar una sala.".into()) }, Err(error) => (params.config.auth.session_cookie.is_some(), error) };
                         let _ = events.send(TuiEvent::SessionFinished(present, message)).await;
                     }
                     Ok(OperationResult::Browser(result)) => { let _ = events.send(TuiEvent::Notice(result.err().unwrap_or_else(|| "Sala abierta en el navegador habitual: allí puedes ver vídeo y comentar con tu sesión.".into()))).await; }
                     Err(error) if error.is_cancelled() => {},
-                    Err(error) => { search_pending = false; preview_job = None; session_pending = false; let _ = events.send(TuiEvent::Notice(format!("La operación terminó inesperadamente: {error}"))).await; }
+                    Err(error) => { search_job = None; preview_job = None; session_job = None; let _ = events.send(TuiEvent::Notice(format!("La operación terminó inesperadamente: {error}"))).await; }
                 }
             }
             Some(result) = recordings.join_next_with_id(), if !recordings.is_empty() => {

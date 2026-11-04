@@ -8,23 +8,40 @@
 ./target/release/cbrec --quality 720p --jobs 2 tui
 ```
 
-Sin `--tag` aparece Inicio sin consultar la red. El tag propuesto es `gaming` y
-Enter inicia la búsqueda. `/` permite editarlo; Ctrl+U lo vacía. Las búsquedas
-anteriores siguen disponibles si falla una actualización.
+Sin `--tag`, Inicio carga el catálogo público del sitio. El orden lo decide el
+servidor y puede incluir promociones; no es una clasificación estricta por
+espectadores ni una recomendación personalizada de tu cuenta.
+
+Pulsa `/` o el buscador y escribe `#gaming` (también se conserva `gaming`),
+`@usuario` o una URL como `https://chaturbate.com/usuario/`. Enter confirma;
+Esc deja de editar y Ctrl+U vacía el campo. Pegar una URL no ejecuta atajos.
+Una búsqueda vacía abre el catálogo general. Un perfil se consulta directamente,
+sin recorrer el catálogo; si no hay datos de espectadores se indica expresamente.
+
+`--limit` es el tamaño de página (1–50), no un límite total de exploración.
+Los botones Anterior/Siguiente y PgUp/PgDn recorren páginas; se muestran el número
+de página y el total cuando la API lo entrega. Se conservan las entradas adicionales
+promocionadas del servidor. El catálogo cambia en directo, por lo que una sala
+puede aparecer de nuevo o cambiar de posición entre peticiones.
+Una búsqueda nueva cancela la anterior y descarta sus respuestas tardías.
+Cada búsqueda tiene un plazo de ocho segundos; un error conserva la página actual
+y `R` repite la solicitud que falló. No se descargan todas las páginas por adelantado.
 
 | Tecla | Acción |
 |---|---|
-| Enter | Explorar desde Inicio; entrar en la sala seleccionada y pedir su miniatura |
+| Enter | Confirmar el buscador mientras se edita; entrar en la sala seleccionada |
+| PgUp/PgDn o [ / ] | Página anterior / siguiente |
+| p | Cargar populares desde Inicio |
 | ↑/↓ o j/k | Seleccionar una sala o grabación |
 | o | Abrir la sala en el navegador predeterminado para ver vídeo y comentar |
 | l | Abrir el sitio en el navegador para iniciar sesión |
-| a | Recibir una sesión efímera mediante Violentmonkey, sin cerrar el panel |
+| a | Elegir el navegador abierto y recibir su sesión efímera con Violentmonkey |
 | r | Grabar la sala seleccionada en segundo plano |
 | s | Detener la grabación seleccionada y conservar lo recibido |
 | g | Ver las grabaciones activas; permite detenerlas aunque se cambie de búsqueda |
 | c | Cambiar la calidad de la próxima grabación |
 | t | Pedir o actualizar la miniatura de la sala seleccionada |
-| R | Repetir la búsqueda actual |
+| R | Repetir la última solicitud, incluida la página que falló |
 | + / - | Acercar o alejar la miniatura; al acercar se recorta el centro |
 | f | Ampliar el panel de la sala dentro de la terminal |
 | h / Esc | Inicio / volver a la pantalla anterior |
@@ -51,7 +68,7 @@ e `iterm2`. Los protocolos forzados dependen del terminal. El proyecto upstream
 La representación de texto sigue limitada por las celdas; no ofrece la calidad
 de una imagen en navegador. No se requiere una ventana gráfica independiente.
 
-Inicio incluye tarjetas pulsables para Explorar, Grabaciones y Conectar sesión;
+Inicio incluye el catálogo y tarjetas pulsables para Populares, Grabaciones y Conectar sesión;
 el campo de búsqueda también acepta clic. Hay botones superiores para las
 acciones de cada pantalla. Puedes pulsarlos con
 el ratón, seleccionar filas con clic y navegar con la rueda. Los atajos de teclado
@@ -76,9 +93,17 @@ que abra el navegador predeterminado; allí puedes comentar si tienes sesión y
 permisos de la sala. cbrec no envía comentarios ni usa endpoints históricos de
 mensajería sin verificar. Tampoco envía cookies a ese proceso ni a las miniaturas.
 
-Para la sesión del grabador, inicia sesión en tu navegador, pulsa `a` en la TUI,
-y usa «Enviar sesión a cbrec» en Violentmonkey con la dirección local mostrada.
-La dirección es de un solo uso y caduca en 120 segundos. La cookie se mantiene
+Para conectar la sesión del grabador:
+
+1. Mantén abierto el navegador y la pestaña de Chaturbate con tu sesión ya iniciada.
+2. Instala Violentmonkey y [el userscript de cbrec](../scripts/cbrec-violentmonkey.user.js), según el README.
+3. Pulsa `a` y elige Firefox, Chrome, Chromium, Edge, Brave u otro navegador con flechas y Enter, número o clic.
+4. Ejecuta «Enviar sesión a cbrec» en esa misma pestaña y pega la dirección local que muestra la TUI.
+
+Elegir el navegador guía la transferencia: cbrec no detecta ventanas, lee perfiles
+ni inicia sesión automáticamente. Esc o el botón Cancelar cierran el receptor
+pendiente y conservan la sesión anterior. La dirección es de un solo uso y caduca
+en 120 segundos. La cookie se mantiene
 en memoria; «Sesión recibida» no acredita identidad ni acceso hasta consultar
 una sala. Sigue disponible `cbrec --browser-session tui`.
 
@@ -92,7 +117,7 @@ calidad con las que se lanzaron; cambiar esos valores afecta a las siguientes.
 
 | Contrato | Verificación |
 |---|---|
-| Inicio sin tag; compatible con `--tag` | `tui_can_start_at_home_without_a_tag`, `parse_tui_command` |
+| Inicio con catálogo; compatible con `--tag` | `tui_can_start_at_home_without_a_tag`, `parse_tui_command`, pruebas de páginas del cliente |
 | Teclado, edición y pantallas independientes | Pruebas del estado y rendering en `presentation/tui.rs` |
 | Sin grabar una sala oculta desde Inicio | `recordings_remain_selectable_after_changing_search_and_home_cannot_record_a_hidden_room` |
 | Zoom visible en una terminal pequeña | `preview_zoom_keeps_source_resolution` |
@@ -177,3 +202,9 @@ resize, regreso a Inicio y salida, con y sin NO_COLOR.
 La caché evita recodificar y reenviar una imagen estática en cada frame.
 Véanse [el informe y los comandos de QA](thumbnail_rendering.md#corrección-aplicada-imágenes-dentro-de-la-tui).
 No se ha verificado esta ruta en Windows/macOS nativos ni en todos los emuladores.
+
+
+## Investigación y aceptación del catálogo
+
+Véase [el análisis de conexión entre web, API y TUI](tui_discovery.md): reglas,
+fuentes públicas inspeccionadas, pruebas de paginación, URLs y asistente de sesión.

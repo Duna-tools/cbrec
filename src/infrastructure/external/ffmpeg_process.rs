@@ -1,12 +1,16 @@
-//! Runs and supervises the FFmpeg child process used for stream recording.
+//! Supervisa FFmpeg, la recuperación acotada de red y el cierre de grabaciones.
 //!
-//! This module owns process construction, cancellation, stall detection, and
-//! stderr sanitization. It does not resolve stream URLs or know about HTTP.
+//! Conserva los diagnósticos finales sin exponer URLs multimedia ni cookies.
 
 use crate::infrastructure::InfrastructureError;
+use std::collections::VecDeque;
 use std::future;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStdin};
 use tokio::sync::watch;
@@ -18,23 +22,41 @@ const STALL_CHECK_SECS: u64 = 5;
 const DISK_CHECK_SECS: u64 = 30;
 const MAX_FFMPEG_STDERR_BYTES: usize = 64 * 1024;
 
-async fn read_bounded_stderr<R>(reader: &mut R) -> Vec<u8>
+async fn read_bounded_stderr<R>(reader: &mut R, input_damaged: &AtomicBool) -> Vec<u8>
 where
     R: tokio::io::AsyncRead + Unpin,
 {
-    let mut retained = Vec::with_capacity(MAX_FFMPEG_STDERR_BYTES);
+    let mut retained = VecDeque::with_capacity(MAX_FFMPEG_STDERR_BYTES);
     let mut chunk = [0_u8; 8 * 1024];
+    let mut detection = Vec::with_capacity(chunk.len() + 64);
 
     loop {
         let read = match reader.read(&mut chunk).await {
             Ok(0) | Err(_) => break,
             Ok(read) => read,
         };
-        let remaining = MAX_FFMPEG_STDERR_BYTES.saturating_sub(retained.len());
-        retained.extend_from_slice(&chunk[..read.min(remaining)]);
+        if !input_damaged.load(Ordering::Relaxed) {
+            detection.extend_from_slice(&chunk[..read]);
+            let damaged = [
+                b"Packet corrupt".as_slice(),
+                b"corrupt input packet",
+                b"failed too many times, skipping",
+            ]
+            .iter()
+            .any(|marker| detection.windows(marker.len()).any(|part| part == *marker));
+            if damaged {
+                input_damaged.store(true, Ordering::Relaxed);
+            }
+            // El solape conserva avisos partidos entre lecturas, aunque el log salga de la cola.
+            let discard = detection.len().saturating_sub(64);
+            detection.drain(..discard);
+        }
+        let overflow = (retained.len() + read).saturating_sub(MAX_FFMPEG_STDERR_BYTES);
+        retained.drain(..overflow);
+        retained.extend(&chunk[..read]);
     }
 
-    retained
+    retained.into_iter().collect()
 }
 
 pub(super) async fn run_ffmpeg(
@@ -45,6 +67,49 @@ pub(super) async fn run_ffmpeg(
     min_free_space: u64,
     cancel_rx: Option<watch::Receiver<bool>>,
 ) -> Result<(), InfrastructureError> {
+    let result = run_ffmpeg_once(
+        ffmpeg_path,
+        stream_url,
+        output_path,
+        max_duration_secs,
+        min_free_space,
+        cancel_rx.clone(),
+        true,
+    )
+    .await;
+    let unsupported = matches!(&result, Err(InfrastructureError::RecordingError(message)) if message.contains("seg_max_retry") && (message.contains("Unrecognized option") || message.contains("Option not found")));
+    if unsupported {
+        let empty = match tokio::fs::metadata(output_path).await {
+            Ok(metadata) => metadata.len() == 0,
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        };
+        if empty {
+            // FFmpeg anterior a 6.1 no ofrece este reintento; no reabrir datos ya escritos.
+            return run_ffmpeg_once(
+                ffmpeg_path,
+                stream_url,
+                output_path,
+                max_duration_secs,
+                min_free_space,
+                cancel_rx,
+                false,
+            )
+            .await;
+        }
+    }
+    result
+}
+
+async fn run_ffmpeg_once(
+    ffmpeg_path: &Path,
+    stream_url: &str,
+    output_path: &Path,
+    max_duration_secs: Option<u64>,
+    min_free_space: u64,
+    cancel_rx: Option<watch::Receiver<bool>>,
+    segment_retry: bool,
+) -> Result<(), InfrastructureError> {
+    let input_damaged = Arc::new(AtomicBool::new(false));
     if cancel_rx
         .as_ref()
         .is_some_and(|receiver| *receiver.borrow())
@@ -60,7 +125,7 @@ pub(super) async fn run_ffmpeg(
     command
         .arg("-hide_banner")
         .arg("-loglevel")
-        .arg("error")
+        .arg("warning")
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -69,6 +134,7 @@ pub(super) async fn run_ffmpeg(
 
     let mut child = command
         .args(duration_args(max_duration_secs))
+        .args(input_recovery_args(stream_url, segment_retry))
         .arg("-i")
         .arg(stream_url)
         .arg("-c")
@@ -82,14 +148,15 @@ pub(super) async fn run_ffmpeg(
         })?;
     // Child::wait cierra stdin; conservarlo permite finalizar con q antes de recurrir a señales.
     let mut stdin = child.stdin.take();
-    let mut stderr_task = child
-        .stderr
-        .take()
-        .map(|mut stderr| tokio::spawn(async move { read_bounded_stderr(&mut stderr).await }));
+    let mut stderr_task = child.stderr.take().map(|mut stderr| {
+        let damaged = input_damaged.clone();
+        tokio::spawn(async move { read_bounded_stderr(&mut stderr, &damaged).await })
+    });
 
     if let Some(mut cancel_rx) = cancel_rx {
         if *cancel_rx.borrow() {
             cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
+            ensure_input_integrity(&input_damaged)?;
             return Err(InfrastructureError::RecordingCancelled);
         }
 
@@ -99,10 +166,12 @@ pub(super) async fn run_ffmpeg(
             }
             _ = async { cancel_rx.wait_for(|value| *value).await.ok(); } => {
                 cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
+                ensure_input_integrity(&input_damaged)?;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_duration_limit(max_duration_secs) => {
                 cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
+                ensure_input_integrity(&input_damaged)?;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_stall(
@@ -128,6 +197,7 @@ pub(super) async fn run_ffmpeg(
             }
             _ = wait_for_duration_limit(max_duration_secs) => {
                 cancel_ffmpeg(&mut child, stdin.take(), stderr_task.take()).await;
+                ensure_input_integrity(&input_damaged)?;
                 return Err(InfrastructureError::RecordingCancelled);
             }
             _ = wait_for_stall(
@@ -148,7 +218,46 @@ pub(super) async fn run_ffmpeg(
         }
     }
 
+    ensure_input_integrity(&input_damaged)?;
     Ok(())
+}
+
+fn ensure_input_integrity(input_damaged: &AtomicBool) -> Result<(), InfrastructureError> {
+    if input_damaged.load(Ordering::Relaxed) {
+        return Err(InfrastructureError::RecordingError("FFmpeg detectó paquetes corruptos o segmentos perdidos; revisa la integridad de la grabación".into()));
+    }
+    Ok(())
+}
+
+fn input_recovery_args(stream_url: &str, segment_retry: bool) -> &'static [&'static str] {
+    if !url::Url::parse(stream_url)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https"))
+    {
+        return &[];
+    }
+    // El cliente valida HLS; reintentar segmentos evita saltos y no debe reiniciar su EOF normal.
+    let args: &[&str] = &[
+        "-rw_timeout",
+        "15000000",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_on_network_error",
+        "1",
+        "-reconnect_on_http_error",
+        "429,500,502,503,504",
+        "-reconnect_delay_max",
+        "5",
+        "-seg_max_retry",
+        "3",
+    ];
+    if segment_retry {
+        args
+    } else {
+        &args[..args.len() - 2]
+    }
 }
 
 fn recording_format_args(path: &Path) -> &'static [&'static str] {
@@ -364,7 +473,8 @@ fn summarize_stderr(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
     let mut summary = Vec::new();
 
-    for line in text.lines() {
+    // El error final debe aparecer antes de los avisos repetidos de una emisión larga.
+    for line in text.lines().rev() {
         let line = redact_sensitive_line(line.trim());
         if line.is_empty() {
             continue;
@@ -608,6 +718,335 @@ mod tests {
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 
+    #[tokio::test]
+    #[ignore = "Requiere FFmpeg y ffprobe; ejecutar explícitamente en CI"]
+    async fn transient_hls_segment_failure_keeps_all_video_packets() {
+        assert_hls_recording_recovers(false, false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Requiere FFmpeg y ffprobe; ejecutar explícitamente en CI"]
+    async fn partial_hls_segment_is_reported_and_preserved() {
+        assert_hls_recording_recovers(true, false).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Requiere FFmpeg y ffprobe; ejecutar explícitamente en CI"]
+    async fn buffered_hls_relay_recovers_partial_segments_without_losing_frames() {
+        assert_hls_recording_recovers(true, true).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "Requiere FFmpeg y ffprobe; ejecutar explícitamente en CI"]
+    async fn buffered_hls_relay_retries_http_failures_without_changing_frames() {
+        assert_hls_recording_recovers(false, true).await;
+    }
+
+    async fn assert_hls_recording_recovers(truncate_segment: bool, buffered: bool) {
+        use std::collections::HashMap;
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let root = std::env::temp_dir().join(format!(
+            "cbrec_hls_retry_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let source = root.join("source.m3u8");
+        let generated = tokio::process::Command::new("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=64x64:rate=10",
+                "-t",
+                "12",
+                "-c:v",
+                "mpeg2video",
+                "-g",
+                "10",
+                "-sc_threshold",
+                "1000000000",
+                "-f",
+                "hls",
+                "-hls_time",
+                "1",
+                "-hls_list_size",
+                "0",
+                "-hls_segment_filename",
+            ])
+            .arg(root.join("seg%d.ts"))
+            .arg(&source)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let mut assets = HashMap::new();
+        let mut files = tokio::fs::read_dir(&root).await.unwrap();
+        while let Some(file) = files.next_entry().await.unwrap() {
+            assets.insert(
+                format!("/{}", file.file_name().to_string_lossy()),
+                tokio::fs::read(file.path()).await.unwrap(),
+            );
+        }
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/source.m3u8", listener.local_addr().unwrap());
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let count = attempts.clone();
+        let playlist_attempts = Arc::new(AtomicUsize::new(0));
+        let playlist_count = playlist_attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.windows(4).any(|p| p == b"\r\n\r\n") {
+                    let mut buffer = [0; 1024];
+                    let size = socket.read(&mut buffer).await.unwrap();
+                    if size == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..size]);
+                    assert!(request.len() < 8192);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let path = request.split_whitespace().nth(1).unwrap_or("");
+                let attempt = if path == "/seg8.ts" {
+                    count.fetch_add(1, Ordering::SeqCst)
+                } else {
+                    usize::MAX
+                };
+                let failing = !truncate_segment && attempt < 5;
+                let truncated = truncate_segment && attempt == 0;
+                let master_failed =
+                    path == "/source.m3u8" && playlist_count.fetch_add(1, Ordering::SeqCst) == 0;
+                let (status, body) = if failing || master_failed {
+                    ("503 Service Unavailable", &[][..])
+                } else if let Some(body) = assets.get(path) {
+                    ("200 OK", body.as_slice())
+                } else {
+                    ("404 Not Found", &[][..])
+                };
+                let start = request
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(key, _)| key.eq_ignore_ascii_case("range"))
+                    .and_then(|(_, range)| range.trim().strip_prefix("bytes="))
+                    .and_then(|range| range.split('-').next())
+                    .and_then(|start| start.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let (status, range) = if status == "200 OK" && start > 0 {
+                    (
+                        "206 Partial Content",
+                        format!(
+                            "Content-Range: bytes {start}-{}/{}\r\n",
+                            body.len() - 1,
+                            body.len()
+                        ),
+                    )
+                } else {
+                    (status, String::new())
+                };
+                let served = &body[start.min(body.len())..];
+                let header = format!(
+                    "HTTP/1.1 {status}\r\n{range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    served.len()
+                );
+                if socket.write_all(header.as_bytes()).await.is_ok() {
+                    let bytes = if truncated {
+                        &served[..served.len() / 2]
+                    } else {
+                        served
+                    };
+                    let _ = socket.write_all(bytes).await;
+                }
+            }
+        });
+        let relay = if buffered {
+            Some(
+                super::super::hls_relay::HlsRelay::start(reqwest::Client::new(), &url)
+                    .await
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        let input = relay
+            .as_ref()
+            .map_or(url.as_str(), |relay| relay.url.as_str());
+        let destination = root.join("recording.mp4");
+        let result = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_ffmpeg(Path::new("ffmpeg"), input, &destination, None, 0, None),
+        )
+        .await;
+        server.abort();
+        let result = result.unwrap();
+        if truncate_segment && !buffered {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("paquetes corruptos o segmentos perdidos"),
+                "{error}"
+            );
+            assert!(tokio::fs::metadata(&destination).await.unwrap().len() > 0);
+            tokio::fs::remove_dir_all(root).await.unwrap();
+            return;
+        }
+        result.unwrap();
+        let probe = tokio::process::Command::new("ffprobe")
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-count_packets",
+                "-show_entries",
+                "stream=nb_read_packets",
+                "-of",
+                "json",
+            ])
+            .arg(&destination)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            probe.status.success(),
+            "{}",
+            String::from_utf8_lossy(&probe.stderr)
+        );
+        let report: serde_json::Value = serde_json::from_slice(&probe.stdout).unwrap();
+        let packets = report["streams"][0]["nb_read_packets"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(
+            packets, 120,
+            "Un fallo HTTP transitorio no debe descartar un segmento de vídeo"
+        );
+        assert!(attempts.load(Ordering::SeqCst) >= if truncate_segment { 2 } else { 6 });
+        assert!(playlist_attempts.load(Ordering::SeqCst) >= 2);
+        let mut hashes = Vec::new();
+        for input in [&source, &destination] {
+            let decoded = tokio::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-xerror", "-i"])
+                .arg(input)
+                .args(["-map", "0:v:0", "-f", "framemd5", "-"])
+                .output()
+                .await
+                .unwrap();
+            assert!(
+                decoded.status.success(),
+                "{}",
+                String::from_utf8_lossy(&decoded.stderr)
+            );
+            let frames: Vec<String> = String::from_utf8_lossy(&decoded.stdout)
+                .lines()
+                .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
+                .map(|line| line.rsplit(',').next().unwrap().trim().to_string())
+                .collect();
+            assert_eq!(frames.len(), 120);
+            hashes.push(frames);
+        }
+        assert!(
+            hashes[0] == hashes[1],
+            "La recuperación debe conservar los píxeles decodificados de todos los cuadros"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn legacy_ffmpeg_falls_back_only_before_any_recording_bytes_exist() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!(
+            "cbrec_legacy_ffmpeg_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let executable = root.join("ffmpeg");
+        tokio::fs::write(
+            &executable,
+            r#"#!/bin/sh
+for arg do
+    if [ "$arg" = "-seg_max_retry" ]; then
+        echo "Unrecognized option 'seg_max_retry'" >&2
+        exit 1
+    fi
+    output="$arg"
+done
+printf 'fallback recording' > "$output"
+"#,
+        )
+        .await
+        .unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let output = root.join("recording.mp4");
+        run_ffmpeg(
+            &executable,
+            "https://example.com/live.m3u8",
+            &output,
+            None,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tokio::fs::read(&output).await.unwrap(),
+            b"fallback recording"
+        );
+        tokio::fs::write(&output, b"existing bytes must survive")
+            .await
+            .unwrap();
+        assert!(run_ffmpeg(
+            &executable,
+            "https://example.com/live.m3u8",
+            &output,
+            None,
+            0,
+            None
+        )
+        .await
+        .is_err());
+        assert_eq!(
+            tokio::fs::read(&output).await.unwrap(),
+            b"existing bytes must survive"
+        );
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn http_recovery_limits_transient_statuses_and_preserves_normal_eof() {
+        for source in ["local.mp4", "file:///tmp/local.mp4", "pipe:0"] {
+            assert!(input_recovery_args(source, true).is_empty());
+        }
+        let options = input_recovery_args("https://example.com/live.m3u8", true);
+        let get = |key| {
+            options
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .find(|p| p[0] == key)
+                .map(|p| p[1])
+        };
+        assert_eq!(get("-reconnect_on_http_error"), Some("429,500,502,503,504"));
+        assert_eq!(get("-reconnect_delay_max"), Some("5"));
+        assert!(!input_recovery_args("https://example.com/live.m3u8", false)
+            .contains(&"-seg_max_retry"));
+        assert_eq!(get("-rw_timeout"), Some("15000000"));
+        assert_eq!(get("-seg_max_retry"), Some("3"));
+        assert_eq!(get("-reconnect_at_eof"), None);
+    }
+
     #[test]
     fn fragmentation_only_applies_to_mp4_containers() {
         for extension in ["mp4", "MP4", "mov", "m4v"] {
@@ -636,7 +1075,7 @@ mod tests {
     fn stderr_summary_redacts_cookie() {
         let summary = summarize_stderr(b"Cookie: PHPSESSID=secret; other=value\nfailure").unwrap();
 
-        assert_eq!(summary, "Cookie: [redacted] | failure");
+        assert_eq!(summary, "failure | Cookie: [redacted]");
     }
 
     #[test]
@@ -644,7 +1083,7 @@ mod tests {
         let stderr = b"1\n2\n3\n4\n5\n6\n7\n8\n9\n";
         let summary = summarize_stderr(stderr).unwrap();
 
-        assert_eq!(summary, "1 | 2 | 3 | 4 | 5 | 6 | 7 | 8");
+        assert_eq!(summary, "9 | 8 | 7 | 6 | 5 | 4 | 3 | 2");
     }
 
     #[test]
@@ -659,18 +1098,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stderr_reader_drains_input_but_keeps_a_bounded_prefix() {
-        let input = vec![b'x'; MAX_FFMPEG_STDERR_BYTES * 3];
+    async fn stderr_reader_drains_input_and_keeps_the_final_failure() {
+        let mut input = vec![b'x'; MAX_FFMPEG_STDERR_BYTES * 3];
+        input.extend_from_slice(b"\nfatal: connection lost at the end\n");
         let (mut writer, mut reader) = tokio::io::duplex(1024);
         let writer_task = tokio::spawn(async move {
             writer.write_all(&input).await.expect("write stderr data");
         });
 
-        let captured = read_bounded_stderr(&mut reader).await;
+        let captured = read_bounded_stderr(&mut reader, &AtomicBool::new(false)).await;
         writer_task.await.expect("stderr writer completes");
 
         assert_eq!(captured.len(), MAX_FFMPEG_STDERR_BYTES);
+        assert!(captured.ends_with(b"fatal: connection lost at the end\n"));
+        assert!(summarize_stderr(&captured)
+            .unwrap()
+            .starts_with("fatal: connection lost at the end"));
+    }
+
+    #[tokio::test]
+    async fn damaged_input_is_remembered_after_the_warning_leaves_the_log_tail() {
+        let (mut writer, mut reader) = tokio::io::duplex(8);
+        let writer = tokio::spawn(async move {
+            writer.write_all(b"Packet corrupt\n").await.unwrap();
+            writer
+                .write_all(&vec![b'x'; MAX_FFMPEG_STDERR_BYTES * 2])
+                .await
+                .unwrap();
+        });
+        let damaged = AtomicBool::new(false);
+        let captured = read_bounded_stderr(&mut reader, &damaged).await;
+        writer.await.unwrap();
+        assert_eq!(captured.len(), MAX_FFMPEG_STDERR_BYTES);
         assert!(captured.iter().all(|byte| *byte == b'x'));
+        assert!(ensure_input_integrity(&damaged).is_err());
+        assert!(ensure_input_integrity(&AtomicBool::new(false)).is_ok());
     }
 
     #[tokio::test]

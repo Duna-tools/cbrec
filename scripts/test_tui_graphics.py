@@ -142,6 +142,13 @@ def check(binary, output):
             key(ord("h"))
             restored = capture("home-restored")
             assert home[100 * 1200 * 3:600 * 1200 * 3] == restored[100 * 1200 * 3:600 * 1200 * 3], "Quedaron gráficos al volver a Inicio"
+            key(ord("a"))
+            wizard = capture("session-browser")
+            first_row = bytes(component for x in range(480) for component in [240 if x % 8 < 4 else 20, x * 255 // 480, 0])
+            assert first_row not in wizard, "La imagen nativa debe ocultarse bajo el asistente"
+            key(ord("2"))
+            key(0xff1b)  # Escape cancela el asistente sin cerrar la TUI.
+            assert_source(capture("session-cancelled"))
             key(ord("q"))
             assert child.wait(timeout=10) == 0
             transcript = (output / "terminal.log").read_bytes()
@@ -154,7 +161,7 @@ def check(binary, output):
                 pass
             time.sleep(.2)
             result = {"status": "PASS", "source_pixels_verified": 480 * 270 * 2,
-                      "home_restored": True, "mouse_card": True, "resize": True, "mouse_disabled_on_exit": True,
+                      "home_restored": True, "session_overlay": True, "mouse_card": True, "resize": True, "mouse_disabled_on_exit": True,
                       "no_color": env.get("NO_COLOR", "")}
             (output / "result.json").write_text(json.dumps(result, indent=2))
             print(json.dumps(result))

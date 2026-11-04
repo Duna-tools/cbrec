@@ -2,6 +2,7 @@ use crate::domain::repositories::StreamRepository;
 use crate::domain::value_objects::VideoQuality;
 use crate::domain::value_objects::{ModelName, StreamUrl};
 use crate::infrastructure::external::ffmpeg_process::run_ffmpeg;
+use crate::infrastructure::external::hls_relay::HlsRelay;
 use crate::infrastructure::InfrastructureError;
 use async_trait::async_trait;
 use quick_m3u8::config::ParsingOptionsBuilder;
@@ -22,7 +23,7 @@ const HTTP_RETRY_MAX_ELAPSED_SECS: u64 = 10;
 const MAX_RESPONSE_BODY_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug)]
-enum RetryFailure<E> {
+pub(super) enum RetryFailure<E> {
     Transient(E),
     Permanent(E),
 }
@@ -76,7 +77,9 @@ async fn read_limited_text(
 /// Retries transient HTTP failures with bounded deterministic exponential delays.
 ///
 /// ponytail: add jitter only if synchronized clients create measurable upstream load spikes.
-async fn retry_with_backoff<T, F, Fut>(mut operation: F) -> Result<T, InfrastructureError>
+pub(super) async fn retry_with_backoff<T, F, Fut>(
+    mut operation: F,
+) -> Result<T, InfrastructureError>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<T, RetryFailure<InfrastructureError>>>,
@@ -118,6 +121,7 @@ struct ChatVideoContext {
 struct RoomListResponse {
     #[serde(default)]
     rooms: Vec<RoomListEntry>,
+    total_count: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,6 +142,12 @@ pub(crate) struct DiscoveredRoom {
     pub(crate) subject: String,
     pub(crate) viewers: u64,
     pub(crate) show: String,
+}
+
+pub(crate) struct RoomPage {
+    pub rooms: Vec<DiscoveredRoom>,
+    pub total: Option<usize>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -298,13 +308,30 @@ impl ChaturbateClient {
         tag: &str,
         limit: usize,
     ) -> Result<Vec<DiscoveredRoom>, InfrastructureError> {
+        Ok(self
+            .discover_room_page(Some(tag), limit, 0)
+            .await?
+            .rooms
+            .into_iter()
+            .take(limit)
+            .collect())
+    }
+
+    pub(crate) async fn discover_room_page(
+        &self,
+        tag: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<RoomPage, InfrastructureError> {
         let url = format!("{}/api/ts/roomlist/room-list/", self.base_url);
 
         self.cancel_http(retry_with_backoff(|| async {
-            let response = self
-                .client
-                .get(&url)
-                .query(&[("hashtags", tag), ("limit", &limit.to_string())])
+            let mut request = self.client.get(&url);
+            if let Some(tag) = tag {
+                request = request.query(&[("hashtags", tag)]);
+            }
+            let response = request
+                .query(&[("limit", limit), ("offset", offset)])
                 .send()
                 .await
                 .map_err(|error| {
@@ -335,12 +362,20 @@ impl ChaturbateClient {
                 )))
             })?;
 
-            Ok(response
+            let has_more = response
+                .total_count
+                .map_or(response.rooms.len() >= limit, |total| {
+                    offset.saturating_add(limit) < total
+                });
+            let total = response.total_count;
+            let rooms = response
                 .rooms
                 .into_iter()
                 .filter_map(|room| {
                     let tags = room.tags.unwrap_or_default();
-                    if !tags.iter().any(|value| value.eq_ignore_ascii_case(tag)) {
+                    if tag.is_some_and(|tag| {
+                        !tags.iter().any(|value| value.eq_ignore_ascii_case(tag))
+                    }) {
                         return None;
                     }
                     let username = ModelName::try_from(room.username?).ok()?;
@@ -355,8 +390,12 @@ impl ChaturbateClient {
                         show: room.current_show.unwrap_or_else(|| "unknown".to_string()),
                     })
                 })
-                .take(limit)
-                .collect())
+                .collect();
+            Ok(RoomPage {
+                rooms,
+                total,
+                has_more,
+            })
         }))
         .await
     }
@@ -400,15 +439,28 @@ impl StreamRepository for ChaturbateClient {
             .ffmpeg_path
             .as_deref()
             .unwrap_or_else(|| Path::new("ffmpeg"));
-        run_ffmpeg(
+        let relay = HlsRelay::start(self.client.clone(), stream_url.as_str()).await?;
+        let result = run_ffmpeg(
             ffmpeg_path,
-            stream_url.as_str(),
+            &relay.url,
             output_path,
             self.max_duration_secs,
             self.min_free_space,
             self.cancel_rx.clone(),
         )
-        .await
+        .await;
+        match result {
+            Err(InfrastructureError::RecordingCancelled) => {
+                Err(InfrastructureError::RecordingCancelled)
+            }
+            Err(error) => match relay.last_error().await {
+                Some(detail) => Err(InfrastructureError::RecordingError(format!(
+                    "{error}; último error HLS: {detail}"
+                ))),
+                None => Err(error),
+            },
+            Ok(()) => Ok(()),
+        }
     }
 }
 
@@ -1224,10 +1276,80 @@ hi.m3u8
             .get("thumbnail_url")
             .is_none());
         let request = request_task.await.expect("request task");
-        assert!(
-            request.starts_with("GET /api/ts/roomlist/room-list/?hashtags=gaming&limit=2 HTTP/1.1")
-        );
+        assert!(request.starts_with(
+            "GET /api/ts/roomlist/room-list/?hashtags=gaming&limit=2&offset=0 HTTP/1.1"
+        ));
         assert!(!request.to_ascii_lowercase().contains("cookie:"));
+    }
+
+    #[tokio::test]
+    async fn discovery_pages_follow_offsets_totals_and_keep_promoted_entries_without_cookies() {
+        for (tag, offset, total, more) in [(None, 0, 3, true), (Some("gaming"), 2, 3, false)] {
+            let body = if offset == 0 {
+                r#"{"total_count":3,"rooms":[{"username":"alice"},{"username":"bob"},{"username":"promoted"}]}"#
+            } else {
+                r#"{"total_count":3,"rooms":[{"username":"carol","tags":["gaming"]}]}"#
+            };
+            let (url, request) = servidor_http_falso(200, body).await;
+            let mut client = ChaturbateClient::new()
+                .unwrap()
+                .with_session_cookie("sessionid=secret".into());
+            client.base_url = url;
+            let page = client.discover_room_page(tag, 2, offset).await.unwrap();
+            assert_eq!(page.total, Some(total));
+            assert_eq!(page.has_more, more);
+            assert_eq!(page.rooms.len(), if offset == 0 { 3 } else { 1 });
+            let request = request.await.unwrap();
+            assert!(request.contains(&format!("limit=2&offset={offset}")));
+            assert_eq!(request.contains("hashtags=gaming"), tag.is_some());
+            assert!(!request.to_ascii_lowercase().contains("cookie:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn direct_profile_query_uses_fixed_context_and_preserves_access_states() {
+        use crate::application::commands::discover::find_page;
+        for (status, body, expected) in [
+            (200, r#"{"room_status":"offline"}"#, Some("offline")),
+            (
+                200,
+                r#"{"room_status":"public","hls_source":"https://example.com/live.m3u8"}"#,
+                Some("online"),
+            ),
+            (403, "{}", Some("requiere sesión o permisos")),
+            (429, "{}", None),
+            (200, "<html>blocked</html>", None),
+        ] {
+            let (url, request) = servidor_http_falso(status, body).await;
+            let mut client = ChaturbateClient::new().unwrap();
+            client.base_url = url;
+            let result = find_page(
+                &client,
+                "https://chaturbate.com/Alice/?token=ignored",
+                20,
+                0,
+            )
+            .await;
+            if let Some(show) = expected {
+                let (query, page) = result.unwrap();
+                assert_eq!(query, "@alice");
+                assert_eq!(page.rooms[0].show, show);
+                assert!(!page.has_more);
+            } else {
+                assert!(result.is_err());
+            }
+            let request = request.await.unwrap();
+            assert!(request.starts_with("GET /api/chatvideocontext/alice/ HTTP/1.1"));
+            assert!(!request.contains("token="));
+        }
+        let client = ChaturbateClient::new().unwrap();
+        for (query, limit, offset) in [
+            ("@alice", 20, 20),
+            ("https://evil.example/alice", 20, 0),
+            ("", 0, 0),
+        ] {
+            assert!(find_page(&client, query, limit, offset).await.is_err());
+        }
     }
 
     #[tokio::test]
@@ -1998,17 +2120,17 @@ hi.m3u8
         };
         let worker = tokio::spawn(run_worker(params, 5, incoming, updates));
         actions
-            .send(TuiAction::Search("bad tag".into()))
+            .send(TuiAction::Search("bad tag".into(), 0, 1))
             .await
             .unwrap();
         assert!(matches!(
             tokio::time::timeout(Duration::from_secs(2), events.recv())
                 .await
                 .unwrap(),
-            Some(TuiEvent::Rooms(_, Err(_)))
+            Some(TuiEvent::Rooms(_, _, _, Err(_)))
         ));
         actions
-            .send(TuiAction::Search("#Gaming".into()))
+            .send(TuiAction::Search("#Gaming".into(), 0, 2))
             .await
             .unwrap();
         match tokio::time::timeout(Duration::from_secs(2), events.recv())
@@ -2016,8 +2138,9 @@ hi.m3u8
             .unwrap()
             .unwrap()
         {
-            TuiEvent::Rooms(tag, Ok(rooms)) => {
-                assert_eq!(tag, "gaming");
+            TuiEvent::Rooms(tag, 0, 2, Ok(page)) => {
+                let rooms = page.rooms;
+                assert_eq!(tag, "#gaming");
                 assert_eq!(rooms.len(), 1);
                 assert_eq!(rooms[0].username, "alice");
             }
@@ -2096,6 +2219,87 @@ hi.m3u8
             .await
             .unwrap()
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn new_search_cancels_a_stalled_catalog_and_session_cancel_closes_the_receiver() {
+        use crate::application::commands::tui::{run_worker, TuiParams};
+        use crate::infrastructure::AppConfig;
+        use crate::presentation::tui::{TuiAction, TuiEvent};
+        let mut server = http_test_server(vec![], true).await;
+        let mut client = ChaturbateClient::new().unwrap();
+        client.base_url = server.url.clone();
+        let (_cancel, cancel_rx) = watch::channel(false);
+        let (actions, incoming) = tokio::sync::mpsc::channel(16);
+        let (updates, mut events) = tokio::sync::mpsc::channel(16);
+        let worker = tokio::spawn(run_worker(
+            TuiParams {
+                client,
+                config: AppConfig::default(),
+                ffmpeg_path: "missing".into(),
+                ffmpeg_explicit: true,
+                output_root: None,
+                max_recordings: 1,
+                min_file_size: None,
+                initial_quality: VideoQuality::Best,
+                cancel_rx,
+            },
+            20,
+            incoming,
+            updates,
+        ));
+        actions
+            .send(TuiAction::Search("#gaming".into(), 0, 1))
+            .await
+            .unwrap();
+        server.wait_for_request().await;
+        actions
+            .send(TuiAction::Search("bad tag".into(), 0, 2))
+            .await
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(result, TuiEvent::Rooms(_, 0, 2, Err(_))));
+        assert_eq!(server.request_count(), 1);
+        actions
+            .send(TuiAction::Search("#music".into(), 0, 3))
+            .await
+            .unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(9), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(event, TuiEvent::Rooms(_, 0, 3, Err(error)) if error.contains("8 segundos"))
+        );
+        actions.send(TuiAction::ConnectSession).await.unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let url = match result {
+            TuiEvent::SessionUrl(url) => reqwest::Url::parse(&url).unwrap(),
+            _ => panic!("Falta receptor"),
+        };
+        actions.send(TuiAction::CancelSession).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap(),
+            Some(TuiEvent::SessionFinished(false, _))
+        ));
+        actions.send(TuiAction::Quit).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), worker)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            tokio::net::TcpStream::connect(("127.0.0.1", url.port().unwrap()))
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

@@ -103,7 +103,7 @@ pub enum Commands {
         /// Tag inicial, con o sin `#`; omitir para abrir Inicio.
         #[arg(long, default_value = "")]
         tag: String,
-        /// Numero maximo de resultados (1-50).
+        /// Salas por página (1-50); permite recorrer más páginas desde la TUI.
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
