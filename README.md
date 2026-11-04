@@ -328,6 +328,9 @@ max_simultaneous = 3
 El código se organiza para separar reglas, orquestación, adaptadores y la interfaz
 de terminal. No es necesario conocer esta estructura para usar el programa.
 
+Para modificarlo, consulta el [mapa de dependencias y recorridos](docs/architecture.md)
+y las [áreas de mantenimiento](MAINTAINERS.md).
+
 ```text
 src/
 ├── domain/                  # Tipos validados y contratos
