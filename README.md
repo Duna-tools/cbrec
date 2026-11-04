@@ -7,9 +7,8 @@
 [`beta`](https://github.com/Duna-tools/cbrec/tree/beta) contiene las mejoras en prueba.
 [Contribuir](CONTRIBUTING.md) · [Ramas y releases](docs/development.md) · [Cambios](CHANGELOG.md) · [Seguridad](SECURITY.md)
 
-Simple, efficient, low-resource stream recorder written in Rust.
-
-Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
+Grabador de streams de Chaturbate escrito en Rust, con panel interactivo en la
+terminal, búsqueda por URL o usuario y vigilancia automática de salas.
 
 ## Language / Idioma
 
@@ -25,7 +24,33 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 
 ### Descripción
 
-**cbrec** permite grabar streams de Chaturbate de forma sencilla. Proporciona el nombre del modelo y comienza a grabar inmediatamente. Con el comando `watch` puedes monitorizar varios modelos en segundo plano y grabar automáticamente cuando se conecten.
+**cbrec** reúne exploración, miniaturas y controles de grabación en una TUI con
+teclado y ratón. Desde Inicio puedes recorrer el catálogo, buscar por `#tag`,
+`@usuario` o URL y entrar en una sala para iniciar o detener su grabación.
+
+También puedes grabar directamente desde la CLI o usar `watch` para vigilar varias
+salas y grabar cuando se conecten. FFmpeg conserva audio y vídeo sin recodificar;
+los archivos y sus metadatos se mantienen cuando una grabación se interrumpe.
+
+![Inicio de cbrec: catálogo de salas, miniatura, paginación y controles de grabación](docs/images/tui-home.png)
+
+*Captura de la TUI real con salas ficticias y un patrón de imagen sintético.
+Las miniaturas usan gráficos nativos cuando el terminal los admite; la alternativa
+por celdas tiene menor detalle. La captura no muestra reproducción de vídeo.*
+
+<details>
+<summary>Ver el asistente para conectar una sesión del navegador</summary>
+
+![Asistente de sesión: selección del navegador e instrucciones para transferir la sesión](docs/images/tui-session.png)
+
+El asistente pide elegir el navegador y mantenerlo abierto con la sesión iniciada.
+La transferencia utiliza el puente local de Violentmonkey; cbrec no lee los
+perfiles del navegador automáticamente.
+
+</details>
+
+Las capturas se generan con la [fixture visual](examples/tui_fixture.rs), sin red,
+cuentas personales ni grabaciones. Consulta los [controles del panel](docs/tui.md).
 
 ### Inicio rápido
 
@@ -36,7 +61,13 @@ Grabador de streams simple, eficiente y de bajo consumo, escrito en Rust.
 cbrec doctor
 ```
 
-3. Graba un modelo:
+3. Abre el panel interactivo:
+
+```bash
+cbrec tui
+```
+
+4. O graba directamente un modelo:
 
 ```bash
 cbrec nombremodelo
