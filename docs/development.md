@@ -67,3 +67,12 @@ En macOS se excluye únicamente PENDIN de la igualdad: es un estado transitorio
 que [XNU activa al restaurar ICANON](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c),
 no una preferencia del usuario. Se siguen verificando el resto de atributos,
 control de eco, modo canónico, señales y desactivación de captura de ratón.
+
+Las actualizaciones periódicas de Cargo y GitHub Actions se proponen contra
+`beta` mediante Dependabot. Las alertas y actualizaciones de seguridad conservan
+el comportamiento de GitHub sobre la rama predeterminada.
+
+FFmpeg para Windows se fija a un build mensual LGPL, con SHA256 verificado;
+los builds diarios antiguos pueden desaparecer. El preflight de empaquetado
+comprueba su disponibilidad, sin cambiar automáticamente a una URL flotante.
+La revisión Debian `-1` se valida además de la versión base del ejecutable.
