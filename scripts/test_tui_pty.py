@@ -46,6 +46,13 @@ def screen_text(raw):
     return "\n".join("".join(row) for row in rows)
 
 
+def stable_terminal_attributes(attributes):
+    # PENDIN es estado transitorio del kernel al volver a modo canónico, no una preferencia.
+    result = list(attributes)
+    result[3] &= ~getattr(termios, "PENDIN", 0)
+    return result
+
+
 def check(binary):
     binary = str(Path(binary).resolve())
     master, slave = pty.openpty()
@@ -144,7 +151,7 @@ sys.exit(result.returncode)
             assert os.read(status_reader, 32) == b"0", bytes(transcript[-2500:])
             # macOS revoca el PTY al salir su líder; el supervisor vive hasta comprobar termios.
             after = termios.tcgetattr(slave)
-            assert after == before, f"La TUI debe restaurar los atributos del terminal: antes={before!r}; después={after!r}"
+            assert stable_terminal_attributes(after) == stable_terminal_attributes(before), f"La TUI debe restaurar los atributos del terminal: antes={before!r}; después={after!r}"
             assert b"\x1b[?1006l" in transcript, "La TUI debe desactivar la captura de ratón"
             os.write(release_writer, b"1")
             assert child.wait(timeout=3) == 0
@@ -167,4 +174,12 @@ if __name__ == "__main__":
         sys.exit("Uso en POSIX: python3 scripts/test_tui_pty.py <binario-cbrec>")
     assert "No hay grabaciones activas" in screen_text(b"\x1b[2;1HNo\x1b[2;4Hhay\x1b[2;8Hgrabaciones activas")
     assert "Inicio" not in screen_text(b"Inicio\x1b[1;1HSala  ")
+    baseline = [0, 0, 0, termios.ECHO | termios.ICANON | termios.ISIG, 0, 0, []]
+    pending = list(baseline)
+    pending[3] |= getattr(termios, "PENDIN", 0)
+    assert stable_terminal_attributes(pending) == stable_terminal_attributes(baseline)
+    for flag in (termios.ECHO, termios.ICANON, termios.ISIG):
+        changed = list(baseline)
+        changed[3] &= ~flag
+        assert stable_terminal_attributes(changed) != stable_terminal_attributes(baseline)
     check(sys.argv[1])

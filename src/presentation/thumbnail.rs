@@ -396,9 +396,13 @@ mod tests {
         use std::{io::Read, os::unix::net::UnixStream};
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let peer = std::thread::spawn(move || {
-            let mut request = [0; 256];
-            let count = server.read(&mut request).unwrap();
-            assert!(String::from_utf8_lossy(&request[..count]).contains("a=q,t=d,f=24"));
+            server
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let expected = format!("\x1b_Gi={},s=1,v=1,a=q,t=d,f=24;AAAA\x1b\\", image_id() - 1);
+            let mut request = vec![0; expected.len()];
+            server.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected.as_bytes());
             write!(server, "\x1b_Gi={};O", image_id() - 1).unwrap();
             std::thread::sleep(Duration::from_millis(10));
             server.write_all(b"K\x1b\\").unwrap();

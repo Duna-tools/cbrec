@@ -58,3 +58,12 @@ verifican con SHA256SUMS y attestations; esto no reemplaza la QA nativa.
 
 No se declaran probados vídeo HLS integrado, todos los protocolos gráficos o todos
 los instaladores por el hecho de que una suite portable sea correcta.
+
+## QA de terminal en POSIX
+
+La comprobación conserva la sesión del PTY hasta leer el estado posterior al
+cierre de cbrec y compara con una referencia tomada antes de iniciar la TUI.
+En macOS se excluye únicamente PENDIN de la igualdad: es un estado transitorio
+que [XNU activa al restaurar ICANON](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/tty.c),
+no una preferencia del usuario. Se siguen verificando el resto de atributos,
+control de eco, modo canónico, señales y desactivación de captura de ratón.
