@@ -110,7 +110,7 @@ Descarga el binario para tu plataforma desde la [página de releases](https://gi
 | macOS Apple Silicon | `cbrec-macos-aarch64.tar.gz` |
 | Windows x86_64 | `cbrec-windows-x86_64.msi`, `cbrec-windows-x86_64-portable.zip` o `cbrec-windows-x86_64.exe` |
 
-La tabla refleja el pipeline actual. La release `v0.0.2` es anterior a parte de estos paquetes; todos estarán disponibles a partir de la siguiente release etiquetada.
+La tabla refleja el pipeline actual. Consulta los archivos adjuntos a cada release: las versiones antiguas pueden incluir menos formatos.
 
 Para Arch Linux:
 
@@ -492,7 +492,7 @@ Download the binary for your platform from the [releases page](https://github.co
 | macOS Apple Silicon | `cbrec-macos-aarch64.tar.gz` |
 | Windows x86_64 | `cbrec-windows-x86_64.msi`, `cbrec-windows-x86_64-portable.zip`, or `cbrec-windows-x86_64.exe` |
 
-The table reflects the current pipeline. Release `v0.0.2` predates some of these packages; all will be available starting with the next tagged release.
+The table reflects the current pipeline. Check the assets attached to each release: older versions may include fewer formats.
 
 For Arch Linux:
 
